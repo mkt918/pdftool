@@ -122,6 +122,58 @@ def run_ghostscript(gs: Path, src: Path, dst: Path, params: CompressParams, canc
 
 ---
 
+## core/pageops.py — ページ操作（結合・分割・削除・回転・並べ替え）
+
+```python
+@dataclass(frozen=True)
+class PageRef:
+    source_path: Path
+    source_index: int            # 元 PDF 内の 0 始まり
+    rotation: int = 0            # 追加の累積回転 0/90/180/270（自動で mod 360）
+    def rotated(self, delta: int) -> PageRef
+
+def parse_page_spec(spec: str, page_count: int) -> list[int]
+        # '1-5,8,10-12'（1 始まり）→ 0 始まりインデックス列。不正は ValueError（日本語）
+
+class PageList:                  # 編集セッション。全変更操作は Undo 可能
+    def __init__(self, pages: Iterable[PageRef] = (), passwords: dict[Path, str] | None = None)
+    @staticmethod
+    def load_refs(path: Path | str, password: str | None = None) -> list[PageRef]
+    @classmethod
+    def from_pdf(cls, path: Path | str, password: str | None = None) -> PageList
+
+    pages: tuple[PageRef, ...]   # property
+    __len__, __getitem__
+    sources: list[Path]          # property。含まれる元ファイル（出現順）
+    is_modified: bool            # property。最後の save 以降に変更があるか
+    can_undo / can_redo: bool
+    def undo(self) -> bool
+    def redo(self) -> bool
+
+    # 変更操作（indices は 0 始まり。重複・順不同可）
+    def append_pdf(self, path, password=None) -> int          # 結合。追加ページ数を返す
+    def insert_pdf(self, path, at: int, password=None) -> int
+    def remove(self, indices: Iterable[int]) -> None          # 全削除は ValueError
+    def rotate(self, indices: Iterable[int], delta: int) -> None   # 90 の倍数、負も可
+    def move(self, indices: Iterable[int], to: int) -> None   # 選択群を「元の位置 to の直前」へ（D&D 用）
+    def reorder(self, new_order: Sequence[int]) -> None       # 完全な順列
+
+    # 書き出し（すべて新規ファイル。既存名なら _2, _3 …）
+    def default_output_path(self, suffix: str = "edited") -> Path
+    def save(self, dest: Path | str | None = None) -> Path    # None → yy-mm-dd_先頭元名_edited.pdf
+    def export_subset(self, indices, dest=None) -> Path       # 分割（選択ページを別ファイルへ）。状態は不変
+    def export_split_all(self, out_dir=None) -> list[Path]    # 1 ページ 1 ファイル → yy-mm-dd_元名_split/元名_p001.pdf
+
+def write_pages(pages: Sequence[PageRef], dest: Path | str, passwords: dict[Path, str] | None = None) -> Path
+        # 元ファイルと同じパスは PdfError で拒否。.part に書いてから rename
+def merge_pdfs(paths: Sequence[Path | str], dest: Path | str | None = None) -> Path
+```
+
+- 回転は保存時に pypdf の `page.rotate()` で /Rotate に加算する（元の /Rotate と累積）
+- サムネイル表示側は `PdfDocument.render_thumbnail(ref.source_index, rotation=ref.rotation)` で回転をプレビューする
+
+---
+
 ## utils/naming.py — 出力ファイル名規則
 
 ```python
