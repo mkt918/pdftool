@@ -199,7 +199,185 @@ def ghostscript_version(gs_path: Path) -> str | None
 
 ---
 
-## 未実装（Sonnet フェーズで実装。シグネチャは Phase 3 完了時に追記）
+## core/export.py — 画像書き出し（Phase 5 で Sonnet が実装。シグネチャは確定済み）
 
-- core/export.py
-- core/batch.py
+```python
+class ExportCancelled(Exception)
+
+@dataclass(frozen=True)
+class ExportOptions:
+    dpi: int = 150
+    fmt: str = "png"             # 'png' | 'jpg'
+    jpeg_quality: int = 90       # jpg のときのみ
+
+@dataclass(frozen=True)
+class ExportProgress:
+    current: int                 # 1 始まり
+    total: int
+    path: Path                   # 今書いたファイル
+    message: str                 # 日本語
+
+@dataclass
+class ExportResult:
+    output_dir: Path
+    files: list[Path]
+
+def export_pages(
+    src: Path | str, indices: Sequence[int] | None = None, *,    # None = 全ページ（0 始まり）
+    options: ExportOptions = ExportOptions(),
+    out_dir: Path | None = None,                                  # None = 元と同じ場所
+    password: str | None = None,
+    progress: Callable[[ExportProgress], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> ExportResult
+    # 出力先: naming.output_dir(src, options.fmt) → yy-mm-dd_元名_png/
+    # ファイル名: naming.numbered_name(src, 元ページ番号(1 始まり), ext) → 元名_p003.png（選択ページでも元番号を保つ）
+
+def export_refs(
+    refs: Sequence[PageRef], base: Path, *,                       # 編集中の PageList から。回転を反映
+    options: ExportOptions = ExportOptions(),
+    out_dir: Path | None = None,
+    passwords: dict[Path, str] | None = None,
+    progress=None, cancel=None,
+) -> ExportResult
+    # base は出力フォルダ名・ファイル名の基準（通常は page_list[0].source_path）。連番は並び順 1..n
+```
+
+- 描画は `PdfDocument.render_page(index, dpi=options.dpi, rotation=...)`。PIL の `save()` で書く
+- `cancel()` が True なら `ExportCancelled`（書き終えたファイルは残す）
+- 文字列指定は UI 側で `pageops.parse_page_spec()` を通してから `indices` に渡す
+
+---
+
+## core/batch.py — フォルダ一括処理（Phase 5 で Sonnet が実装。シグネチャは確定済み）
+
+```python
+class BatchCancelled(Exception)
+
+@dataclass(frozen=True)
+class BatchItemResult:
+    path: Path
+    ok: bool
+    original_size: int
+    output_size: int | None      # 圧縮: 出力サイズ / 書き出し: None
+    output: Path | None          # 圧縮: 出力 PDF / 書き出し: 出力フォルダ
+    message: str                 # 成功なら空、失敗なら日本語の理由
+
+@dataclass(frozen=True)
+class BatchProgress:
+    index: int                   # 1 始まり
+    total: int
+    path: Path
+    message: str
+
+@dataclass
+class BatchResult:
+    items: list[BatchItemResult]
+    ok_count: int                # property でも可
+    fail_count: int
+
+def list_pdfs(folder: Path | str, recursive: bool = False) -> list[Path]     # 名前順。*.pdf のみ
+
+def batch_compress(
+    folder: Path | str, *, target_mb: float | None = None, preset: str | None = None,   # どちらか必須
+    recursive: bool = False, out_dir: Path | None = None,
+    progress: Callable[[BatchProgress], None] | None = None, cancel: Callable[[], bool] | None = None,
+) -> BatchResult
+
+def batch_export(
+    folder: Path | str, *, options: ExportOptions = ExportOptions(),
+    recursive: bool = False, out_dir: Path | None = None,
+    progress=None, cancel=None,
+) -> BatchResult
+```
+
+- 1 件失敗しても止めない。`PdfError` / `GhostscriptError` は `BatchItemResult.message` に日本語で入れる
+- 暗号化 PDF はバッチではスキップ扱い（ok=False, message='パスワード付きのためスキップ'）
+- `cancel()` が True なら `BatchCancelled`（それまでの items を持たせる: `e.partial: BatchResult`）
+
+---
+
+## UI 骨格（Phase 3 で確定。Sonnet フェーズのパネルはこの範囲だけを使う）
+
+### utils/worker.py
+
+```python
+def pil_to_qimage(img: PIL.Image.Image) -> QImage
+
+class Worker(QRunnable):
+    signals.finished: Signal(object)     # 戻り値
+    signals.error:    Signal(str, object) # (日本語メッセージ, 例外)
+    signals.progress: Signal(object)     # fn が progress(x) に渡したもの
+    signals.cancelled: Signal()
+    def __init__(self, fn, *args, **kwargs)   # fn に progress= / cancel= 引数があれば自動注入
+    def cancel(self) -> None
+    def start(self, pool: QThreadPool | None = None) -> Worker
+
+@dataclass(frozen=True)
+class ThumbRequest: key, source_path, source_index, rotation, width
+
+class ThumbnailWorker(QThread):          # 常駐。要求は後入れ先出し
+    ready:  Signal(str, QImage)
+    failed: Signal(str, str)
+    def set_password(self, path: Path, password: str)
+    def request(self, req: ThumbRequest)
+    def clear_queue(self)
+    def close_documents(self)
+    def stop(self)
+```
+
+### ui/thumbnail_view.py
+
+```python
+THUMB_SIZES = {"小": 120, "中": 180, "大": 240}; DEFAULT_THUMB_WIDTH = 180
+
+class ThumbnailModel(QAbstractListModel):
+    page_list_changed: Signal()
+    page_list: PageList | None          # property
+    def set_page_list(self, pl: PageList | None)
+    def set_password(self, path, password)
+    def thumbnail_width() / set_thumbnail_width(width)
+    # 変更操作（PageList を直接触らず必ずこちらを使う）
+    def remove_pages(rows) / rotate_pages(rows, delta) / move_pages(rows, to)
+    def append_pdf(path, password=None) -> int
+    def undo() -> bool / redo() -> bool
+    # data(): DisplayRole=ページ番号, DecorationRole=QPixmap（未描画はプレースホルダ）, UserRole=PageRef
+
+class ThumbnailView(QListView):
+    page_activated: Signal(int)          # ダブルクリック
+    selection_changed: Signal(list)      # 選択行（昇順）
+    def selected_rows(self) -> list[int]
+    def select_rows(self, rows)
+    def set_thumbnail_width(self, width)
+```
+
+### ui/main_window.py
+
+```python
+class MainWindow(QMainWindow):
+    gs_path: Path | None; gs_version: str | None
+    model: ThumbnailModel; view: ThumbnailView; tabs: QTabWidget; panels: list[PanelBase]
+    page_list: PageList | None           # property
+    def current_source(self) -> Path | None
+    def open_pdf(self, path) -> bool     # 暗号化ならパスワードを聞く。変更ありなら破棄確認
+    def append_pdf(self, path) -> bool
+    def show_error(self, message: str, title="エラー")
+    def run_worker(self, fn, *args, on_finished=None, on_error=None, on_progress=None, on_cancelled=None, **kwargs) -> Worker
+    # ツールバー: act_open / act_append / act_save / act_undo / act_redo / act_rot_l / act_rot_r / act_delete / size_combo
+```
+
+### ui/panels/base.py
+
+```python
+class PanelBase(QWidget):
+    title: str
+    def __init__(self, window: MainWindow, parent=None)     # self.window_ に保持
+    def on_document_changed(self) -> None                   # フック
+    def on_selection_changed(self, rows: list[int]) -> None # フック
+```
+
+パネルの実装ルール:
+- 重い処理は必ず `window_.run_worker(...)` 経由。core 関数の `progress` / `cancel` は自動で配線される
+- 対象ページは `window_.view.selected_rows()`（0 始まり）。`PageRef` は `window_.page_list[row]`
+- Ghostscript が無いときは `window_.gs_path is None`。圧縮パネルは自分を無効化して理由を表示する
+- MainWindow の `_add_panel()` にある PlaceholderPanel を本実装に差し替える

@@ -1,0 +1,379 @@
+"""メインウィンドウ。全体レイアウトとタブ切り替え、ファイルの開閉、ワーカーの起動口。
+
+レイアウト:
+    [ツールバー: 開く / 結合 / 保存 / 元に戻す / やり直し / 左回転 / 右回転 / 削除 / サムネ:小中大]
+    [ サムネイルグリッド (左, 伸縮) | 機能タブ (右: 圧縮 / 画像書き出し / ページ操作 / バッチ) ]
+    [ステータスバー: ファイル名・ページ数・選択数 | Ghostscript の状態]
+
+スレッド境界:
+    - サムネイル描画: ThumbnailWorker（常駐 QThread）。モデルが要求を積む
+    - 圧縮・書き出しなど: run_worker() → QThreadPool。コールバックは主スレッドで呼ばれる
+    - core の PageList は主スレッドだけが触る。ワーカーに渡すのは PageRef のタプルなど不変値
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import Callable
+
+from PySide6.QtCore import QSize, Qt, QThreadPool
+from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QImage, QKeySequence, QPixmap
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QScrollArea,
+    QSplitter,
+    QTabWidget,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
+
+from pdftool.core.compress import format_size
+from pdftool.core.document import PdfDocument, PdfEncryptedError, PdfError
+from pdftool.core.pageops import PageList
+from pdftool.ui.panels.base import PanelBase, PlaceholderPanel
+from pdftool.ui.thumbnail_view import THUMB_SIZES, ThumbnailModel, ThumbnailView
+from pdftool.utils.gs_locator import find_ghostscript, ghostscript_version
+from pdftool.utils.worker import ThumbnailWorker, Worker, pil_to_qimage
+
+APP_TITLE = "PDF ユーティリティ"
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle(APP_TITLE)
+        self.resize(1200, 800)
+        self.setAcceptDrops(True)
+
+        # --- Ghostscript 検出（無ければ圧縮だけ無効化） ---
+        self.gs_path: Path | None = find_ghostscript()
+        self.gs_version: str | None = ghostscript_version(self.gs_path) if self.gs_path else None
+
+        # --- サムネイル基盤 ---
+        self.thumb_worker = ThumbnailWorker(self)
+        self.thumb_worker.start()
+        self.model = ThumbnailModel(self.thumb_worker, self)
+        self.view = ThumbnailView(self.model)
+        self.view.page_activated.connect(self._preview_page)
+        self.view.selection_changed.connect(self._on_selection_changed)
+        self.model.page_list_changed.connect(self._on_document_changed)
+
+        # --- 機能タブ ---
+        self.tabs = QTabWidget()
+        self.panels: list[PanelBase] = []
+        for title in ("圧縮", "画像書き出し", "ページ操作", "バッチ"):
+            self._add_panel(PlaceholderPanel(self, title))
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self.view)
+        splitter.addWidget(self.tabs)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([820, 380])
+        self.setCentralWidget(splitter)
+
+        self._build_toolbar()
+        self._build_statusbar()
+        self._workers: list[Worker] = []   # 実行中ワーカーの参照保持（GC 防止）
+        self._on_document_changed()
+
+    # ------------------------------------------------------------------
+    # 構築
+    # ------------------------------------------------------------------
+    def _add_panel(self, panel: PanelBase) -> None:
+        self.panels.append(panel)
+        self.tabs.addTab(panel, panel.title)
+
+    def _build_toolbar(self) -> None:
+        tb = QToolBar("メイン")
+        tb.setMovable(False)
+        tb.setIconSize(QSize(20, 20))
+        self.addToolBar(tb)
+
+        def act(text: str, slot: Callable, shortcut: str | None = None, tip: str | None = None) -> QAction:
+            a = QAction(text, self)
+            if shortcut:
+                a.setShortcut(QKeySequence(shortcut))
+            if tip:
+                a.setStatusTip(tip)
+            a.triggered.connect(slot)
+            tb.addAction(a)
+            return a
+
+        self.act_open = act("開く", self.open_dialog, "Ctrl+O", "PDF を開く")
+        self.act_append = act("結合…", self.append_dialog, None, "別の PDF を末尾に結合する")
+        self.act_save = act("保存", self.save_dialog, "Ctrl+S", "編集結果を新しい PDF として保存する")
+        tb.addSeparator()
+        self.act_undo = act("元に戻す", self.model.undo, "Ctrl+Z")
+        self.act_redo = act("やり直し", self.model.redo, "Ctrl+Y")
+        tb.addSeparator()
+        self.act_rot_l = act("左回転", lambda: self._rotate(-90), "Ctrl+Left", "選択ページを左に 90° 回転")
+        self.act_rot_r = act("右回転", lambda: self._rotate(90), "Ctrl+Right", "選択ページを右に 90° 回転")
+        self.act_delete = act("削除", self._delete, "Delete", "選択ページを削除")
+        tb.addSeparator()
+        tb.addWidget(QLabel(" サムネイル: "))
+        self.size_combo = QComboBox()
+        for name in THUMB_SIZES:
+            self.size_combo.addItem(name)
+        self.size_combo.setCurrentText("中")
+        self.size_combo.currentTextChanged.connect(lambda n: self.view.set_thumbnail_width(THUMB_SIZES[n]))
+        tb.addWidget(self.size_combo)
+
+    def _build_statusbar(self) -> None:
+        sb = self.statusBar()
+        self.lbl_doc = QLabel("PDF を開いてください（ドラッグ&ドロップ可）")
+        sb.addWidget(self.lbl_doc, 1)
+        self.lbl_gs = QLabel()
+        if self.gs_path:
+            self.lbl_gs.setText(f"Ghostscript {self.gs_version or ''}".strip())
+            self.lbl_gs.setToolTip(str(self.gs_path))
+        else:
+            self.lbl_gs.setText("Ghostscript 未検出 — 圧縮機能は使えません")
+            self.lbl_gs.setStyleSheet("color: #b00;")
+            self.lbl_gs.setToolTip("winget install ArtifexSoftware.GhostScript でインストールしてください")
+        sb.addPermanentWidget(self.lbl_gs)
+
+    # ------------------------------------------------------------------
+    # 状態
+    # ------------------------------------------------------------------
+    @property
+    def page_list(self) -> PageList | None:
+        return self.model.page_list
+
+    def current_source(self) -> Path | None:
+        pl = self.page_list
+        return pl[0].source_path if pl and len(pl) else None
+
+    def _on_document_changed(self) -> None:
+        pl = self.page_list
+        has = pl is not None and len(pl) > 0
+        for a in (self.act_save, self.act_append, self.act_rot_l, self.act_rot_r, self.act_delete):
+            a.setEnabled(has)
+        self.act_undo.setEnabled(bool(pl and pl.can_undo))
+        self.act_redo.setEnabled(bool(pl and pl.can_redo))
+        if has:
+            srcs = pl.sources
+            name = srcs[0].name + (f" ほか {len(srcs) - 1} 件" if len(srcs) > 1 else "")
+            mod = "（変更あり）" if pl.is_modified else ""
+            self.lbl_doc.setText(f"{name}  {len(pl)} ページ{mod}")
+            self.setWindowTitle(f"{name} - {APP_TITLE}")
+        else:
+            self.lbl_doc.setText("PDF を開いてください（ドラッグ&ドロップ可）")
+            self.setWindowTitle(APP_TITLE)
+        for p in self.panels:
+            p.on_document_changed()
+
+    def _on_selection_changed(self, rows: list[int]) -> None:
+        pl = self.page_list
+        if pl and len(pl):
+            base = self.lbl_doc.text().split("  |")[0]
+            self.lbl_doc.setText(base + (f"  |  {len(rows)} ページ選択" if rows else ""))
+        for p in self.panels:
+            p.on_selection_changed(rows)
+
+    # ------------------------------------------------------------------
+    # ファイル操作
+    # ------------------------------------------------------------------
+    def show_error(self, message: str, title: str = "エラー") -> None:
+        QMessageBox.critical(self, title, message)
+
+    def _ask_password(self, path: Path) -> str | None:
+        pw, ok = QInputDialog.getText(
+            self, "パスワード", f"{path.name} はパスワード付きです。\nパスワードを入力してください:",
+            QLineEdit.EchoMode.Password,
+        )
+        return pw if ok and pw else None
+
+    def _load_with_password(self, loader: Callable[[str | None], object], path: Path):
+        """暗号化なら聞き直す。キャンセルで None。"""
+        password: str | None = None
+        while True:
+            try:
+                return loader(password), password
+            except PdfEncryptedError:
+                password = self._ask_password(path)
+                if password is None:
+                    return None, None
+            except PdfError as e:
+                self.show_error(e.message)
+                return None, None
+
+    def open_pdf(self, path: Path | str) -> bool:
+        path = Path(path)
+        if self.page_list is not None and self.page_list.is_modified:
+            if not self._confirm_discard():
+                return False
+        pl, password = self._load_with_password(lambda pw: PageList.from_pdf(path, pw), path)
+        if pl is None:
+            return False
+        self.thumb_worker.close_documents()
+        if password:
+            self.model.set_password(path, password)
+        self.model.set_page_list(pl)
+        return True
+
+    def append_pdf(self, path: Path | str) -> bool:
+        path = Path(path)
+        if self.page_list is None:
+            return self.open_pdf(path)
+        n, password = self._load_with_password(lambda pw: self.model.append_pdf(path, pw), path)
+        return n is not None
+
+    def open_dialog(self) -> None:
+        f, _ = QFileDialog.getOpenFileName(self, "PDF を開く", "", "PDF (*.pdf)")
+        if f:
+            self.open_pdf(f)
+
+    def append_dialog(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(self, "結合する PDF を選ぶ", "", "PDF (*.pdf)")
+        for f in files:
+            if not self.append_pdf(f):
+                break
+
+    def save_dialog(self) -> None:
+        pl = self.page_list
+        if not pl:
+            return
+        default = pl.default_output_path()
+        f, _ = QFileDialog.getSaveFileName(self, "名前を付けて保存", str(default), "PDF (*.pdf)")
+        if not f:
+            return
+        try:
+            out = pl.save(f)
+        except PdfError as e:
+            self.show_error(e.message)
+            return
+        self._on_document_changed()
+        self.statusBar().showMessage(f"保存しました: {out.name}（{format_size(out.stat().st_size)}）", 8000)
+
+    def _confirm_discard(self) -> bool:
+        r = QMessageBox.question(
+            self, "確認", "保存していない変更があります。破棄しますか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return r == QMessageBox.StandardButton.Yes
+
+    # ------------------------------------------------------------------
+    # ページ操作（ツールバー）
+    # ------------------------------------------------------------------
+    def _rotate(self, delta: int) -> None:
+        rows = self.view.selected_rows()
+        if rows:
+            self.model.rotate_pages(rows, delta)
+            self.view.select_rows(rows)
+
+    def _delete(self) -> None:
+        rows = self.view.selected_rows()
+        if not rows:
+            return
+        try:
+            self.model.remove_pages(rows)
+        except ValueError as e:
+            self.show_error(str(e))
+
+    # ------------------------------------------------------------------
+    # ワーカー起動口（パネルから使う）
+    # ------------------------------------------------------------------
+    def run_worker(
+        self,
+        fn: Callable,
+        *args,
+        on_finished: Callable[[object], None] | None = None,
+        on_error: Callable[[str, object], None] | None = None,
+        on_progress: Callable[[object], None] | None = None,
+        on_cancelled: Callable[[], None] | None = None,
+        **kwargs,
+    ) -> Worker:
+        """fn を別スレッドで実行する。コールバックは主スレッドで呼ばれる。戻り値の Worker.cancel() で中断。"""
+        w = Worker(fn, *args, **kwargs)
+        self._workers.append(w)
+
+        def _done(*_):
+            if w in self._workers:
+                self._workers.remove(w)
+
+        if on_finished:
+            w.signals.finished.connect(on_finished)
+        w.signals.error.connect(on_error or (lambda msg, _e: self.show_error(msg)))
+        if on_progress:
+            w.signals.progress.connect(on_progress)
+        if on_cancelled:
+            w.signals.cancelled.connect(on_cancelled)
+        for sig in (w.signals.finished, w.signals.error, w.signals.cancelled):
+            sig.connect(_done)
+        w.start()
+        return w
+
+    # ------------------------------------------------------------------
+    # プレビュー（ダブルクリック）
+    # ------------------------------------------------------------------
+    def _preview_page(self, row: int) -> None:
+        pl = self.page_list
+        if not pl or not 0 <= row < len(pl):
+            return
+        ref = pl[row]
+        pw = self.thumb_worker._passwords.get(ref.source_path)
+
+        def render():
+            with PdfDocument(ref.source_path, password=pw) as doc:
+                return pil_to_qimage(doc.render_page(ref.source_index, dpi=110, rotation=ref.rotation))
+
+        def show(img: QImage):
+            dlg = PagePreviewDialog(img, f"{row + 1} ページ目 - {ref.source_path.name}", self)
+            dlg.show()
+
+        self.run_worker(render, on_finished=show)
+
+    # ------------------------------------------------------------------
+    # D&D / 終了
+    # ------------------------------------------------------------------
+    def dragEnterEvent(self, e: QDragEnterEvent) -> None:
+        if any(u.toLocalFile().lower().endswith(".pdf") for u in e.mimeData().urls()):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e: QDropEvent) -> None:
+        paths = [Path(u.toLocalFile()) for u in e.mimeData().urls() if u.toLocalFile().lower().endswith(".pdf")]
+        if not paths:
+            return
+        # 1 つ目は開く、残りは結合
+        if self.open_pdf(paths[0]):
+            for p in paths[1:]:
+                if not self.append_pdf(p):
+                    break
+        e.acceptProposedAction()
+
+    def closeEvent(self, e: QCloseEvent) -> None:
+        if self.page_list is not None and self.page_list.is_modified and not self._confirm_discard():
+            e.ignore()
+            return
+        self.thumb_worker.stop()
+        QThreadPool.globalInstance().waitForDone(3000)
+        super().closeEvent(e)
+
+
+class PagePreviewDialog(QDialog):
+    """1 ページの拡大表示（スクロールのみ。ズームは作らない）。"""
+
+    def __init__(self, image: QImage, title: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        lbl = QLabel()
+        lbl.setPixmap(QPixmap.fromImage(image))
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        area = QScrollArea()
+        area.setWidget(lbl)
+        area.setWidgetResizable(True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(area)
+        self.resize(min(image.width() + 40, 1000), min(image.height() + 40, 900))
