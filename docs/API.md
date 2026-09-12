@@ -400,3 +400,17 @@ class PanelBase(QWidget):
 
 いずれも `PanelBase` を継承し、`window_.run_worker()` 経由でのみ core を呼ぶ。
 `QMessageBox` 等のモーダルは offscreen テストでは固まるため、テストでは `window_.show_error` を monkeypatch すること。
+
+---
+
+## exe化（PyInstaller、v1完了後に追加）
+
+- `pdftool.spec`: ビルド定義。`build.bat` から使う（`.venv\Scripts\pyinstaller --noconfirm pdftool.spec`）
+- 出力: `dist\PDFユーティリティ.exe`（onefile / windowed、約60MB）
+- pypdfium2 のネイティブDLL（pypdfium2_raw）は `collect_all` で明示的に同梱している
+  （pyinstaller-hooks-contrib に標準フックはあるが、バージョン差異対策として明示）
+- Ghostscript は同梱しない（PLAN.md のライセンス方針どおり。実行時に `gs_locator` が検出する）
+- `src/pdftool/__main__.py` に `sys.excepthook` を追加。exe化(--windowed)するとコンソールが無く
+  素の例外が消えてしまうため、`%TEMP%\pdftool_error.log` に書き出し、QApplication があれば
+  ダイアログでも通知する
+- 実機で `dist\PDFユーティリティ.exe` の起動・日本語PDFのオープン・サムネイル描画まで動作確認済み
