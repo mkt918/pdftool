@@ -206,7 +206,7 @@ class ExportCancelled(Exception)
 
 @dataclass(frozen=True)
 class ExportOptions:
-    dpi: int = 150
+    dpi: int = 200                # 2026-09-12 に150→200へ変更
     fmt: str = "png"             # 'png' | 'jpg'
     jpeg_quality: int = 90       # jpg のときのみ
 
@@ -393,8 +393,11 @@ class PanelBase(QWidget):
 
 ### Phase 4 で実装したパネル（ui/panels/*.py）
 
-- `CompressPanel`: 目標サイズ / プリセットで `window_.current_source()` を圧縮。出力先は常に元と同じフォルダ
-- `ExportPanel`: 全ページ / 選択ページ / 範囲指定(`parse_page_spec`) で `export_refs` を実行（pageops の回転・並べ替えを反映）
+- `CompressPanel`: 目標サイズ / プリセットで `window_.current_source()` を圧縮。出力先は常に元と同じフォルダ。
+  目標サイズの初期値は 28MB(多くのアップロード先にある30MB制限を意識した値。2026-09-12〜)
+- `ExportPanel`: 全ページ / 選択ページ / 範囲指定(`parse_page_spec`) で `export_refs` を実行（pageops の回転・並べ替えを反映）。
+  左のサムネイル選択と「対象ページ」コンボは自動連動する(選択あり→選択ページ、選択解除→全ページ)。
+  「範囲指定」を選んでいる間はこの自動連動を止める(手動入力を上書きしない)。既定 dpi は 200(2026-09-12〜)
 - `PageOpsPanel`: 範囲指定選択、任意位置への PDF 挿入（`model.insert_pdf`）、分割（`page_list.export_subset` / `export_split_all`、別スレッド実行）
 - `BatchPanel`: フォルダ指定で `batch_compress` / `batch_export`。結果は `QTableWidget` に一覧表示、キャンセル時は `partial` があれば表示する
 

@@ -26,8 +26,12 @@ def test_options_validation():
     assert o.fmt == "jpg" and o.ext == ".jpg" and o.pil_format == "JPEG"
 
 
+def test_export_options_default_dpi_is_200():
+    assert ExportOptions().dpi == 200
+
+
 def test_export_all_pages_default_png(image_pdf: Path):
-    r = export_pages(image_pdf, options=ExportOptions())  # 既定 150dpi
+    r = export_pages(image_pdf, options=ExportOptions())  # 既定 200dpi
     assert r.output_dir.parent == image_pdf.parent
     assert r.output_dir.name.endswith("_進路 資料_png")
     assert len(r.files) == 3
@@ -36,7 +40,7 @@ def test_export_all_pages_default_png(image_pdf: Path):
         assert f.exists()
         img = Image.open(f)
         assert img.format == "PNG"
-        assert img.size == (600, 800)  # 元画像と同じ解像度（150dpiで作成→150dpiで書き出し）
+        assert img.size == (800, 1067)  # 288x384pt を 200dpi で書き出した結果
 
 
 def test_export_dpi_and_jpeg(image_pdf: Path):

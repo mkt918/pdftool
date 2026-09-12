@@ -98,22 +98,36 @@ def test_export_panel_all_pages(win: MainWindow, tmp_path: Path):
     assert len(list(panel._last_output_dir.glob("*.png"))) == 3
 
 
-def test_export_panel_selected_pages_requires_selection(win: MainWindow, tmp_path: Path, monkeypatch):
+def test_export_panel_selection_auto_syncs_with_thumbnail_view(win: MainWindow, tmp_path: Path):
+    """左のサムネイルで複数選択するだけで、対象ページが自動的に切り替わること。"""
     panel = export_panel(win)
-    errors = []
-    monkeypatch.setattr(win, "show_error", lambda msg, title="エラー": errors.append(msg))
     win.open_pdf(make_image_pdf(tmp_path / "選択 書出.pdf", pages=3))
-    panel.range_combo.setCurrentIndex(panel.range_combo.findData("selected"))
-    win.view.select_rows([])
-    panel.run_btn.click()
-    # 選択なしなのでエラーになりジョブは開始しない（run_btn は有効なまま）
-    assert errors and "選択" in errors[0]
-    assert panel.run_btn.isEnabled()
+    assert panel.range_combo.currentData() == "all"
+    assert "未選択" in panel.selection_label.text()
+
     win.view.select_rows([0, 2])
     QApplication.processEvents()
+    assert panel.range_combo.currentData() == "selected"
+    assert "2 ページ選択中" in panel.selection_label.text()
     panel.run_btn.click()
     assert wait_until(lambda: "完了" in panel.status_label.text())
     assert len(list(panel._last_output_dir.glob("*.png"))) == 2
+
+    # 選択を解除すると自動で「全ページ」に戻る
+    win.view.select_rows([])
+    QApplication.processEvents()
+    assert panel.range_combo.currentData() == "all"
+    assert "未選択" in panel.selection_label.text()
+
+
+def test_export_panel_spec_mode_not_overridden_by_selection(win: MainWindow, tmp_path: Path):
+    """「範囲指定」を選んでいる間はサムネイル選択で上書きされないこと。"""
+    panel = export_panel(win)
+    win.open_pdf(make_image_pdf(tmp_path / "範囲固定.pdf", pages=3))
+    panel.range_combo.setCurrentIndex(panel.range_combo.findData("spec"))
+    win.view.select_rows([0])
+    QApplication.processEvents()
+    assert panel.range_combo.currentData() == "spec"
 
 
 def test_export_panel_spec_mode(win: MainWindow, tmp_path: Path):

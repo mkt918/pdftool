@@ -119,7 +119,7 @@ class BatchPanel(PanelBase):
         row1 = QHBoxLayout()
         self.c_target_spin = QDoubleSpinBox()
         self.c_target_spin.setRange(0.1, 500.0)
-        self.c_target_spin.setValue(5.0)
+        self.c_target_spin.setValue(28.0)  # 例: 30MB制限のあるアップロード先を想定した既定値
         self.c_target_spin.setSuffix(" MB")
         row1.addWidget(QLabel("目標:"))
         row1.addWidget(self.c_target_spin)
@@ -146,7 +146,7 @@ class BatchPanel(PanelBase):
         form.setContentsMargins(0, 0, 0, 0)
         self.e_dpi_spin = QSpinBox()
         self.e_dpi_spin.setRange(30, 600)
-        self.e_dpi_spin.setValue(150)
+        self.e_dpi_spin.setValue(200)
         form.addRow("解像度(dpi):", self.e_dpi_spin)
         self.e_fmt_combo = QComboBox()
         self.e_fmt_combo.addItem("PNG", "png")

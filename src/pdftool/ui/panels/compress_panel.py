@@ -68,7 +68,7 @@ class CompressPanel(PanelBase):
         target_row = QHBoxLayout()
         self.target_spin = QDoubleSpinBox()
         self.target_spin.setRange(0.1, 500.0)
-        self.target_spin.setValue(5.0)
+        self.target_spin.setValue(28.0)  # 例: 30MB制限のあるアップロード先を想定した既定値
         self.target_spin.setSuffix(" MB")
         target_row.addWidget(QLabel("目標:"))
         target_row.addWidget(self.target_spin)

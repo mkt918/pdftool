@@ -2,7 +2,7 @@
 
 GUI 非依存。PySide6 を import しないこと。
 
-資料貼り付け用途。既定 150dpi / PNG。
+資料貼り付け用途。既定 200dpi / PNG。
 出力先は元PDFと同じ場所に作った専用サブフォルダ（`yy-mm-dd_元名_png/` など）。
 ファイル名は `元名_p001.png` のゼロ埋め連番。
 
@@ -35,7 +35,7 @@ class ExportCancelled(Exception):
 
 @dataclass(frozen=True)
 class ExportOptions:
-    dpi: int = 150
+    dpi: int = 200
     fmt: str = "png"        # 'png' | 'jpg'
     jpeg_quality: int = 90  # jpg のときのみ使う
 
@@ -173,7 +173,7 @@ def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="PDF のページを画像として書き出す")
     ap.add_argument("pdf", type=Path)
     ap.add_argument("--pages", type=str, default=None, help="1-5,8,10-12 形式。省略で全ページ")
-    ap.add_argument("--dpi", type=int, default=150)
+    ap.add_argument("--dpi", type=int, default=200)
     ap.add_argument("--fmt", choices=["png", "jpg"], default="png")
     ap.add_argument("--quality", type=int, default=90, help="jpg のときの品質 (1-100)")
     ap.add_argument("--out", type=Path, default=None, help="出力先フォルダ（既定: 元と同じ場所）")

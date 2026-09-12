@@ -47,6 +47,10 @@ class ExportPanel(PanelBase):
         self.range_combo.addItem("選択ページ", "selected")
         self.range_combo.addItem("範囲指定", "spec")
         range_lay.addWidget(self.range_combo)
+        self.selection_label = QLabel()
+        self.selection_label.setStyleSheet("color: #666;")
+        self.selection_label.setWordWrap(True)
+        range_lay.addWidget(self.selection_label)
         self.spec_edit = QLineEdit()
         self.spec_edit.setPlaceholderText("例: 1-5,8,10-12")
         self.spec_edit.setEnabled(False)
@@ -60,7 +64,7 @@ class ExportPanel(PanelBase):
         form = QFormLayout(opt_box)
         self.dpi_spin = QSpinBox()
         self.dpi_spin.setRange(30, 600)
-        self.dpi_spin.setValue(150)
+        self.dpi_spin.setValue(200)
         form.addRow("解像度(dpi):", self.dpi_spin)
         self.fmt_combo = QComboBox()
         self.fmt_combo.addItem("PNG", "png")
@@ -100,6 +104,7 @@ class ExportPanel(PanelBase):
         lay.addWidget(self.open_folder_btn)
 
         lay.addStretch(1)
+        self._update_selection_label()
         self._update_run_enabled()
 
     # -- 状態管理 -------------------------------------------------------
@@ -107,7 +112,23 @@ class ExportPanel(PanelBase):
         self._update_run_enabled()
 
     def on_selection_changed(self, rows: list[int]) -> None:
+        # 左のサムネイルで複数選択すれば、それだけでそのページが対象になる。
+        # 「範囲指定」（文字入力）を選んでいる間だけは上書きしない。
+        if self.range_combo.currentData() != "spec":
+            target = "selected" if rows else "all"
+            idx = self.range_combo.findData(target)
+            if self.range_combo.currentIndex() != idx:
+                self.range_combo.setCurrentIndex(idx)
+        self._update_selection_label(rows)
         self._update_run_enabled()
+
+    def _update_selection_label(self, rows: list[int] | None = None) -> None:
+        if rows is None:
+            rows = self.window_.view.selected_rows()
+        if rows:
+            self.selection_label.setText(f"サムネイルで {len(rows)} ページ選択中")
+        else:
+            self.selection_label.setText("未選択（全ページが対象）")
 
     def _update_run_enabled(self) -> None:
         running = self._worker is not None
