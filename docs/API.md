@@ -308,8 +308,13 @@ class Worker(QRunnable):
     signals.finished: Signal(object)     # 戻り値
     signals.error:    Signal(str, object) # (日本語メッセージ, 例外)
     signals.progress: Signal(object)     # fn が progress(x) に渡したもの
-    signals.cancelled: Signal()
-    def __init__(self, fn, *args, **kwargs)   # fn に progress= / cancel= 引数があれば自動注入
+    signals.cancelled: Signal(object)    # 中断時の部分結果（例: BatchCancelled.partial）。無ければ None
+    def __init__(self, fn, *args, **kwargs)
+        # fn のシグネチャに 'progress'/'cancel' があれば自動注入。
+        # **kw で下位関数へ丸ごと転送するだけの関数（VAR_KEYWORD あり。例: compress_preset）にも注入する
+        # （fn 側が実際に受け取れるかはシグネチャで判断できないため、渡して問題なければ常に注入）
+        # 例外の型名が '...Cancelled' で終わる、または cancel() が True の状態で例外が出た場合は
+        # cancelled を emit する（getattr(e, "partial", None) があればそれを一緒に渡す）
     def cancel(self) -> None
     def start(self, pool: QThreadPool | None = None) -> Worker
 
@@ -340,6 +345,7 @@ class ThumbnailModel(QAbstractListModel):
     # 変更操作（PageList を直接触らず必ずこちらを使う）
     def remove_pages(rows) / rotate_pages(rows, delta) / move_pages(rows, to)
     def append_pdf(path, password=None) -> int
+    def insert_pdf(path, at: int, password=None) -> int
     def undo() -> bool / redo() -> bool
     # data(): DisplayRole=ページ番号, DecorationRole=QPixmap（未描画はプレースホルダ）, UserRole=PageRef
 
@@ -362,6 +368,8 @@ class MainWindow(QMainWindow):
     def open_pdf(self, path) -> bool     # 暗号化ならパスワードを聞く。変更ありなら破棄確認
     def append_pdf(self, path) -> bool
     def show_error(self, message: str, title="エラー")
+    def password_for(self, path: Path) -> str | None      # そのファイルを開くのに使ったパスワード
+    def passwords_dict(self) -> dict[Path, str]            # export_refs 等に渡す用の一覧
     def run_worker(self, fn, *args, on_finished=None, on_error=None, on_progress=None, on_cancelled=None, **kwargs) -> Worker
     # ツールバー: act_open / act_append / act_save / act_undo / act_redo / act_rot_l / act_rot_r / act_delete / size_combo
 ```
@@ -381,3 +389,14 @@ class PanelBase(QWidget):
 - 対象ページは `window_.view.selected_rows()`（0 始まり）。`PageRef` は `window_.page_list[row]`
 - Ghostscript が無いときは `window_.gs_path is None`。圧縮パネルは自分を無効化して理由を表示する
 - MainWindow の `_add_panel()` にある PlaceholderPanel を本実装に差し替える
+
+
+### Phase 4 で実装したパネル（ui/panels/*.py）
+
+- `CompressPanel`: 目標サイズ / プリセットで `window_.current_source()` を圧縮。出力先は常に元と同じフォルダ
+- `ExportPanel`: 全ページ / 選択ページ / 範囲指定(`parse_page_spec`) で `export_refs` を実行（pageops の回転・並べ替えを反映）
+- `PageOpsPanel`: 範囲指定選択、任意位置への PDF 挿入（`model.insert_pdf`）、分割（`page_list.export_subset` / `export_split_all`、別スレッド実行）
+- `BatchPanel`: フォルダ指定で `batch_compress` / `batch_export`。結果は `QTableWidget` に一覧表示、キャンセル時は `partial` があれば表示する
+
+いずれも `PanelBase` を継承し、`window_.run_worker()` 経由でのみ core を呼ぶ。
+`QMessageBox` 等のモーダルは offscreen テストでは固まるため、テストでは `window_.show_error` を monkeypatch すること。

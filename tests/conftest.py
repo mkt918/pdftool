@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import random
+import time
 from pathlib import Path
 
 import pytest
 from PIL import Image
 from pypdf import PdfWriter
+
+# UI テストは常に offscreen（GUI テストファイルより先に import される conftest で設定する）
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 def _noisy_image(w: int, h: int, seed: int) -> Image.Image:
@@ -70,3 +75,39 @@ def empty_pdf(tmp_path: Path) -> Path:
     out = tmp_path / "空.pdf"
     PdfWriter().write(out)
     return out
+
+
+# ---------------------------------------------------------------------------
+# UI（offscreen）共通フィクスチャ
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="session")
+def app():
+    from PySide6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
+
+
+def wait_until(cond, timeout: float = 10.0) -> bool:
+    """条件が満たされるまでイベントループを回す（QThread/QThreadPool の結果待ち用）。"""
+    from PySide6.QtWidgets import QApplication
+
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        QApplication.processEvents()
+        if cond():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+@pytest.fixture
+def win(app):
+    from pdftool.ui.main_window import MainWindow
+
+    w = MainWindow()
+    w._confirm_discard = lambda: True  # モーダルは offscreen で固まるので潰す
+    w.resize(1000, 700)
+    w.show()
+    yield w
+    w.thumb_worker.stop()
+    w.close()

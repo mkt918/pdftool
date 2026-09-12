@@ -39,7 +39,11 @@ from PySide6.QtWidgets import (
 from pdftool.core.compress import format_size
 from pdftool.core.document import PdfDocument, PdfEncryptedError, PdfError
 from pdftool.core.pageops import PageList
-from pdftool.ui.panels.base import PanelBase, PlaceholderPanel
+from pdftool.ui.panels.base import PanelBase
+from pdftool.ui.panels.batch_panel import BatchPanel
+from pdftool.ui.panels.compress_panel import CompressPanel
+from pdftool.ui.panels.export_panel import ExportPanel
+from pdftool.ui.panels.pageops_panel import PageOpsPanel
 from pdftool.ui.thumbnail_view import THUMB_SIZES, ThumbnailModel, ThumbnailView
 from pdftool.utils.gs_locator import find_ghostscript, ghostscript_version
 from pdftool.utils.worker import ThumbnailWorker, Worker, pil_to_qimage
@@ -70,8 +74,8 @@ class MainWindow(QMainWindow):
         # --- 機能タブ ---
         self.tabs = QTabWidget()
         self.panels: list[PanelBase] = []
-        for title in ("圧縮", "画像書き出し", "ページ操作", "バッチ"):
-            self._add_panel(PlaceholderPanel(self, title))
+        for panel_cls in (CompressPanel, ExportPanel, PageOpsPanel, BatchPanel):
+            self._add_panel(panel_cls(self))
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.view)
@@ -139,7 +143,7 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_gs.setText("Ghostscript 未検出 — 圧縮機能は使えません")
             self.lbl_gs.setStyleSheet("color: #b00;")
-            self.lbl_gs.setToolTip("winget install ArtifexSoftware.GhostScript でインストールしてください")
+            self.lbl_gs.setToolTip("README の手順でインストールしてください（winget または公式インストーラ）")
         sb.addPermanentWidget(self.lbl_gs)
 
     # ------------------------------------------------------------------
@@ -152,6 +156,14 @@ class MainWindow(QMainWindow):
     def current_source(self) -> Path | None:
         pl = self.page_list
         return pl[0].source_path if pl and len(pl) else None
+
+    def password_for(self, path: Path) -> str | None:
+        """指定ファイルの、開くときに使ったパスワード（無ければ None）。"""
+        return self.thumb_worker._passwords.get(path)
+
+    def passwords_dict(self) -> dict[Path, str]:
+        """現在把握している全ファイルのパスワード一覧（export_refs などに渡す用）。"""
+        return dict(self.thumb_worker._passwords)
 
     def _on_document_changed(self) -> None:
         pl = self.page_list

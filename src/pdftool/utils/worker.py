@@ -50,7 +50,7 @@ class WorkerSignals(QObject):
     finished = Signal(object)          # 関数の戻り値
     error = Signal(str, object)        # (日本語メッセージ, 例外オブジェクト)
     progress = Signal(object)          # 関数が progress() に渡したもの
-    cancelled = Signal()
+    cancelled = Signal(object)         # 中断時の部分結果（例: BatchCancelled.partial）。無ければ None
 
 
 class Worker(QRunnable):
@@ -82,15 +82,21 @@ class Worker(QRunnable):
             params = inspect.signature(self.fn).parameters
         except (TypeError, ValueError):
             params = {}
-        if "progress" in params and "progress" not in kwargs:
+        # **kw で下位関数へ丸ごと転送するだけの関数（例: compress_preset）は
+        # シグネチャ上に 'progress'/'cancel' という名前が出てこないので、
+        # VAR_KEYWORD (**kw) があれば「渡せば通る」とみなして注入する。
+        has_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+        if ("progress" in params or has_var_kw) and "progress" not in kwargs:
             kwargs["progress"] = self.signals.progress.emit
-        if "cancel" in params and "cancel" not in kwargs:
+        if ("cancel" in params or has_var_kw) and "cancel" not in kwargs:
             kwargs["cancel"] = self.is_cancelled
         try:
             result = self.fn(*self.args, **kwargs)
         except Exception as e:  # noqa: BLE001 — すべて UI に届ける
-            if self._cancel.is_set() or type(e).__name__ == "CompressCancelled":
-                self.signals.cancelled.emit()
+            # 中断は "...Cancelled" という命名規約（CompressCancelled / ExportCancelled /
+            # BatchCancelled）で揃えている。BatchCancelled は途中結果を .partial に持つ。
+            if self._cancel.is_set() or type(e).__name__.endswith("Cancelled"):
+                self.signals.cancelled.emit(getattr(e, "partial", None))
                 return
             msg = getattr(e, "message", None) or f"{type(e).__name__}: {e}"
             traceback.print_exc()

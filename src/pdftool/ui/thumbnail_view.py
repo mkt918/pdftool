@@ -207,6 +207,15 @@ class ThumbnailModel(QAbstractListModel):
         self._reset()
         return n
 
+    def insert_pdf(self, path: Path, at: int, password: str | None = None) -> int:
+        if self._page_list is None:
+            return 0
+        n = self._page_list.insert_pdf(path, at, password)
+        if password:
+            self.set_password(path, password)
+        self._reset()
+        return n
+
     def undo(self) -> bool:
         if self._page_list is None or not self._page_list.undo():
             return False

@@ -3,34 +3,14 @@
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 
-import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
-
-from conftest import make_image_pdf  # noqa: E402
-from pdftool.ui.main_window import MainWindow  # noqa: E402
-from pdftool.utils.worker import Worker  # noqa: E402
-
-
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
-
-
-def wait_until(cond, timeout=10.0, app=None):
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        QApplication.processEvents()
-        if cond():
-            return True
-        time.sleep(0.02)
-    return False
+from conftest import make_image_pdf, wait_until
+from pdftool.ui.main_window import MainWindow
+from pdftool.utils.worker import Worker
 
 
 def rendered_rows(win: MainWindow) -> list[int]:
@@ -41,17 +21,6 @@ def rendered_rows(win: MainWindow) -> list[int]:
         if pm.cacheKey() != m._placeholder.cacheKey():
             out.append(r)
     return out
-
-
-@pytest.fixture
-def win(app):
-    w = MainWindow()
-    w._confirm_discard = lambda: True   # モーダルは offscreen で固まるので潰す
-    w.resize(1000, 700)
-    w.show()
-    yield w
-    w.thumb_worker.stop()
-    w.close()
 
 
 def test_open_and_thumbnails(win: MainWindow, tmp_path: Path):
@@ -129,6 +98,47 @@ def test_worker_injects_progress_and_cancel(app):
     w2.signals.error.connect(lambda msg, e: errors.append(msg))
     w2.start()
     assert wait_until(lambda: errors == ["RuntimeError: boom"])
+
+
+def test_worker_injects_via_var_keyword(app):
+    """compress_preset のように **kw で下位へ丸ごと転送するだけの関数でも注入されること。"""
+    seen_progress = []
+    seen_cancel = []
+
+    def wrapper(x, **kw):
+        def inner(x, progress=None, cancel=None):
+            progress("p")
+            seen_cancel.append(cancel())
+            return x + 1
+        return inner(x, **kw)
+
+    results = []
+    w = Worker(wrapper, 10)
+    w.signals.progress.connect(seen_progress.append)
+    w.signals.finished.connect(results.append)
+    w.start()
+    assert wait_until(lambda: results == [11])
+    assert seen_progress == ["p"]
+    assert seen_cancel == [False]
+
+
+def test_worker_cancelled_signal_carries_partial(app):
+    class FakeCancelled(Exception):
+        def __init__(self, partial):
+            super().__init__("cancelled")
+            self.partial = partial
+
+    def job(cancel=None):
+        if cancel():
+            raise FakeCancelled(partial={"done": 1})
+
+    payloads = []
+    w = Worker(job)
+    w.cancel()  # 実行前にキャンセル要求しておく
+    w.signals.cancelled.connect(lambda p: payloads.append(p))
+    w.start()
+    assert wait_until(lambda: len(payloads) == 1)
+    assert payloads[0] == {"done": 1}
 
 
 def test_screenshot(win: MainWindow, tmp_path: Path):

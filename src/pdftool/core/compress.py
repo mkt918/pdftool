@@ -204,8 +204,8 @@ def _require_gs(gs: Path | None) -> Path:
     gs = gs or find_ghostscript()
     if gs is None:
         raise GhostscriptNotFoundError(
-            "Ghostscript が見つかりません。`winget install ArtifexSoftware.GhostScript` で"
-            "インストールしてください。"
+            "Ghostscript が見つかりません。README の手順でインストールしてください"
+            "（winget で見つからない場合は公式インストーラを使ってください）。"
         )
     return gs
 
