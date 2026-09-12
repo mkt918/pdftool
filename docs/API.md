@@ -199,7 +199,7 @@ def ghostscript_version(gs_path: Path) -> str | None
 
 ---
 
-## core/export.py — 画像書き出し（Phase 5 で Sonnet が実装。シグネチャは確定済み）
+## core/export.py — 画像書き出し（Phase 5 で実装済み）
 
 ```python
 class ExportCancelled(Exception)
@@ -249,7 +249,7 @@ def export_refs(
 
 ---
 
-## core/batch.py — フォルダ一括処理（Phase 5 で Sonnet が実装。シグネチャは確定済み）
+## core/batch.py — フォルダ一括処理（Phase 5 で実装済み）
 
 ```python
 class BatchCancelled(Exception)
