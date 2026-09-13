@@ -428,11 +428,20 @@ NativeFormat 固定で、テストで `setDefaultFormat(IniFormat)` を当てて
 ## exe化（PyInstaller、v1完了後に追加）
 
 - `pdftool.spec`: ビルド定義。`build.bat` から使う（`.venv\Scripts\pyinstaller --noconfirm pdftool.spec`）
-- 出力: `dist\PDFユーティリティ.exe`（onefile / windowed、約60MB）
+- 出力: `dist\PDFユーティリティ.exe`（onefile / windowed、約80MB）
 - pypdfium2 のネイティブDLL（pypdfium2_raw）は `collect_all` で明示的に同梱している
   （pyinstaller-hooks-contrib に標準フックはあるが、バージョン差異対策として明示）
-- Ghostscript は同梱しない（PLAN.md のライセンス方針どおり。実行時に `gs_locator` が検出する）
+- **Ghostscript は同梱する**（2026-09-13〜。PLAN.md のライセンス注意を参照）。
+  `build.bat` が先に `scripts/bundle_ghostscript.py` を実行し、実機の Ghostscript インストールから
+  `bin/{gswin64c.exe, gsdll64.dll}` + `Resource/` + `lib/` + `iccprofiles/` だけを `vendor/gs/` へ
+  コピーする（doc/examples/アンインストーラは除外。約66MB→約42MB）。`vendor/` は git 管理しない。
+  `pdftool.spec` はこれを `gs/...` としてバイナリ内に埋め込み、`gs_locator.find_ghostscript()` が
+  `sys._MEIPASS/gs/bin/...` を PATH/Program Files より優先して探す（ソース実行時は `_MEIPASS` が
+  無いのでこの分岐は素通りし、従来通り外部インストールを検出する＝`run.bat` は影響を受けない）
 - `src/pdftool/__main__.py` に `sys.excepthook` を追加。exe化(--windowed)するとコンソールが無く
   素の例外が消えてしまうため、`%TEMP%\pdftool_error.log` に書き出し、QApplication があれば
   ダイアログでも通知する
-- 実機で `dist\PDFユーティリティ.exe` の起動・日本語PDFのオープン・サムネイル描画まで動作確認済み
+- 実機で `dist\PDFユーティリティ.exe` の起動・日本語PDFのオープン・サムネイル描画まで動作確認済み。
+  Ghostscript の同梱についても、`ProgramFiles`/`ProgramFiles(x86)` を存在しないパスに向けて外部検出を
+  塞いだ状態で実際に起動し、`_MEIPASS` に展開された `gs/bin/gswin64c.exe` が実際に PDF 変換に
+  成功することを確認済み（外部インストール無しで単体動作する）

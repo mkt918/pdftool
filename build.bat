@@ -23,6 +23,14 @@ if errorlevel 1 (
     )
 )
 
+echo Bundling Ghostscript from the installed copy...
+".venv\Scripts\python.exe" scripts\bundle_ghostscript.py
+if errorlevel 1 (
+    echo [ERROR] Could not bundle Ghostscript. See the messages above.
+    pause
+    exit /b 1
+)
+
 echo Building... this can take a minute or two.
 ".venv\Scripts\pyinstaller.exe" --noconfirm pdftool.spec
 if errorlevel 1 (

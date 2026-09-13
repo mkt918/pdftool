@@ -20,6 +20,35 @@ def test_env_var_takes_priority(monkeypatch, tmp_path: Path):
     assert G.find_ghostscript() == gs
 
 
+def test_bundled_gs_used_when_meipass_present(monkeypatch, tmp_path: Path):
+    """PyInstaller の onefile 展開先（sys._MEIPASS）に gs/bin/... があれば使う。"""
+    monkeypatch.delenv("PDFTOOL_GS", raising=False)
+    bin_dir = tmp_path / "gs" / "bin"
+    bin_dir.mkdir(parents=True)
+    exe = bin_dir / "gswin64c.exe"
+    exe.touch()
+    monkeypatch.setattr(G.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(G.shutil, "which", lambda name: None)  # 同梱が優先され、PATHは見ない
+    assert G.find_ghostscript() == exe
+
+
+def test_bundled_gs_absent_without_meipass(monkeypatch):
+    """ソースから実行中（sys._MEIPASS 無し）は同梱チェックを無視する。"""
+    monkeypatch.delattr(G.sys, "_MEIPASS", raising=False)
+    assert G._bundled_gs() is None
+
+
+def test_env_var_still_wins_over_bundled(monkeypatch, tmp_path: Path):
+    bin_dir = tmp_path / "gs" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "gswin64c.exe").touch()
+    monkeypatch.setattr(G.sys, "_MEIPASS", str(tmp_path), raising=False)
+    env_gs = tmp_path / "explicit.exe"
+    env_gs.touch()
+    monkeypatch.setenv("PDFTOOL_GS", str(env_gs))
+    assert G.find_ghostscript() == env_gs
+
+
 def test_env_var_ignored_if_not_a_file(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("PDFTOOL_GS", str(tmp_path / "ない.exe"))
     monkeypatch.setattr(G.shutil, "which", lambda name: None)
