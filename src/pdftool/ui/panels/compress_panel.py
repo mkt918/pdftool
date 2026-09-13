@@ -140,11 +140,19 @@ class CompressPanel(PanelBase):
         running = self._worker is not None
         self.run_btn.setEnabled(has_doc and has_gs and not running)
 
+    def _set_running_ui(self, running: bool) -> None:
+        """実行中は設定を変えても反映されない（開始時の値で走る）ので、触れないようにする。"""
+        for w in (self.radio_target, self.radio_preset, self.target_spin, self.preset_combo):
+            w.setEnabled(not running)
+        if not running:
+            self._update_gs_state()  # target/preset の排他状態を正しく戻す
+
     # -- 実行 -------------------------------------------------------------
     def _run(self) -> None:
         src = self.window_.current_source()
         if src is None:
             return
+        self._set_running_ui(True)
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.open_folder_btn.setVisible(False)
@@ -179,7 +187,7 @@ class CompressPanel(PanelBase):
         self._worker = None
         self.progress.setVisible(False)
         self.cancel_btn.setEnabled(False)
-        self._update_run_enabled()
+        self._set_running_ui(False)
 
     def _on_finished(self, result: CompressResult) -> None:
         self._reset_running_state()

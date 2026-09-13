@@ -112,9 +112,11 @@ class PageOpsPanel(PanelBase):
         pl = self.window_.page_list
         if pl is None:
             return
-        f, _ = QFileDialog.getOpenFileName(self, "挿入する PDF を選ぶ", "", "PDF (*.pdf)")
+        start = self.window_.settings.value("last_dir", "")
+        f, _ = QFileDialog.getOpenFileName(self, "挿入する PDF を選ぶ", start, "PDF (*.pdf)")
         if not f:
             return
+        self.window_.settings.setValue("last_dir", str(Path(f).parent))
         path = Path(f)
         rows = self.window_.view.selected_rows()
         at = rows[0] if rows else 0

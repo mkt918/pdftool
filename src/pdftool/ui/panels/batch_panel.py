@@ -56,9 +56,9 @@ class BatchPanel(PanelBase):
         self.folder_edit = QLineEdit()
         self.folder_edit.setPlaceholderText("処理するフォルダ")
         folder_row.addWidget(self.folder_edit)
-        browse_btn = QPushButton("参照…")
-        browse_btn.clicked.connect(self._browse)
-        folder_row.addWidget(browse_btn)
+        self.browse_btn = QPushButton("参照…")
+        self.browse_btn.clicked.connect(self._browse)
+        folder_row.addWidget(self.browse_btn)
         lay.addLayout(folder_row)
 
         self.recursive_check = QCheckBox("サブフォルダも対象にする")
@@ -155,9 +155,11 @@ class BatchPanel(PanelBase):
         return w
 
     def _browse(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "処理するフォルダを選ぶ")
+        start = self.window_.settings.value("last_batch_dir", "")
+        d = QFileDialog.getExistingDirectory(self, "処理するフォルダを選ぶ", start)
         if d:
             self.folder_edit.setText(d)
+            self.window_.settings.setValue("last_batch_dir", d)
 
     # -- 実行 -------------------------------------------------------------
     def _run(self) -> None:
@@ -175,6 +177,7 @@ class BatchPanel(PanelBase):
 
         self.table.setRowCount(0)
         self.open_folder_btn.setVisible(False)
+        self._set_running_ui(True)
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.progress.setVisible(True)
@@ -223,11 +226,24 @@ class BatchPanel(PanelBase):
             ))
             self.table.setItem(row, 3, QTableWidgetItem("OK" if item.ok else item.message))
 
+    def _set_running_ui(self, running: bool) -> None:
+        """実行中は設定を変えても反映されない（開始時の値で走る）ので、触れないようにする。"""
+        for w in (
+            self.folder_edit, self.browse_btn, self.recursive_check, self.radio_compress, self.radio_export,
+            self.c_radio_target, self.c_radio_preset, self.c_target_spin, self.c_preset_combo,
+            self.e_dpi_spin, self.e_fmt_combo,
+        ):
+            w.setEnabled(not running)
+        if not running:
+            self.c_target_spin.setEnabled(self.c_radio_target.isChecked())
+            self.c_preset_combo.setEnabled(self.c_radio_preset.isChecked())
+
     def _reset_running_state(self) -> None:
         self._worker = None
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.progress.setVisible(False)
+        self._set_running_ui(False)
 
     def _on_finished(self, result: BatchResult) -> None:
         self._reset_running_state()

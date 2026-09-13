@@ -134,6 +134,16 @@ class ExportPanel(PanelBase):
         running = self._worker is not None
         self.run_btn.setEnabled(self.window_.current_source() is not None and not running)
 
+    def _set_running_ui(self, running: bool) -> None:
+        """実行中は設定を変えても反映されない（開始時の値で走る）ので、触れないようにする。"""
+        for w in (self.range_combo, self.spec_edit, self.dpi_spin, self.fmt_combo, self.quality_spin):
+            w.setEnabled(not running)
+        if not running:
+            # dpi_spin/fmt_combo/spec_edit は常に有効に戻すが、quality_spin と spec_edit は
+            # それぞれ「JPEG選択中か」「範囲指定モードか」に応じた本来の有効/無効に戻す
+            self.quality_spin.setEnabled(self.fmt_combo.currentData() == "jpg")
+            self.spec_edit.setEnabled(self.range_combo.currentData() == "spec")
+
     def _selected_refs(self):
         pl = self.window_.page_list
         mode = self.range_combo.currentData()
@@ -166,6 +176,7 @@ class ExportPanel(PanelBase):
         base = self.window_.current_source()
         passwords = self.window_.passwords_dict()
 
+        self._set_running_ui(True)
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.open_folder_btn.setVisible(False)
@@ -195,6 +206,7 @@ class ExportPanel(PanelBase):
         self._worker = None
         self.progress.setVisible(False)
         self.cancel_btn.setEnabled(False)
+        self._set_running_ui(False)
         self._update_run_enabled()
 
     def _on_finished(self, result: ExportResult) -> None:

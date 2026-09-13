@@ -331,6 +331,10 @@ class ThumbnailWorker(QThread):          # 常駐。要求は後入れ先出し
     def stop(self)
 ```
 
+- `render_thumbnail` が `PdfError` 以外の想定外例外を出したときは、そのファイルの
+  キャッシュ済み `PdfDocument` を閉じて `_docs` から捨てる(2026-09-13〜)。
+  1回の失敗で以後そのファイルの全ページが失敗し続けるのを防ぐため。
+
 ### ui/thumbnail_view.py
 
 ```python
@@ -362,6 +366,7 @@ class ThumbnailView(QListView):
 ```python
 class MainWindow(QMainWindow):
     gs_path: Path | None; gs_version: str | None
+    settings: QSettings          # QSettings()。組織名/アプリ名は __init__ で設定済み
     model: ThumbnailModel; view: ThumbnailView; tabs: QTabWidget; panels: list[PanelBase]
     page_list: PageList | None           # property
     def current_source(self) -> Path | None
@@ -371,7 +376,12 @@ class MainWindow(QMainWindow):
     def password_for(self, path: Path) -> str | None      # そのファイルを開くのに使ったパスワード
     def passwords_dict(self) -> dict[Path, str]            # export_refs 等に渡す用の一覧
     def run_worker(self, fn, *args, on_finished=None, on_error=None, on_progress=None, on_cancelled=None, **kwargs) -> Worker
-    # ツールバー: act_open / act_append / act_save / act_undo / act_redo / act_rot_l / act_rot_r / act_delete / size_combo
+    # ツールバー: act_open / act_append / act_save / act_undo / act_redo / act_rot_l / act_rot_r
+    #            / act_delete / act_select_all(Ctrl+A) / size_combo（選択はQSettingsの'thumb_size'に永続化）
+    # ステータスバー: lbl_doc / lbl_gs / gs_recheck_btn（Ghostscript未検出時のみ表示。押すとキャッシュを
+    #   クリアして再検出し、全パネルの on_document_changed() を呼び直す）
+    # 終了時（closeEvent）: 実行中の run_worker ジョブが残っていれば確認ダイアログを出し、
+    #   Yesなら全ワーカーに cancel() してから待つ（Noなら閉じない）
 ```
 
 ### ui/panels/base.py
@@ -389,6 +399,9 @@ class PanelBase(QWidget):
 - 対象ページは `window_.view.selected_rows()`（0 始まり）。`PageRef` は `window_.page_list[row]`
 - Ghostscript が無いときは `window_.gs_path is None`。圧縮パネルは自分を無効化して理由を表示する
 - MainWindow の `_add_panel()` にある PlaceholderPanel を本実装に差し替える
+- ジョブ実行中は入力欄も触れないようにする（`_set_running_ui(bool)` という名前で統一。
+  実行開始時に `True`、`_reset_running_state()` の中で `False` を呼ぶ）。実行中に値を変えても
+  開始時のスナップショットに反映されないので、変えられる見た目のまま放置すると誤解を招く
 
 
 ### Phase 4 で実装したパネル（ui/panels/*.py）
@@ -403,6 +416,12 @@ class PanelBase(QWidget):
 
 いずれも `PanelBase` を継承し、`window_.run_worker()` 経由でのみ core を呼ぶ。
 `QMessageBox` 等のモーダルは offscreen テストでは固まるため、テストでは `window_.show_error` を monkeypatch すること。
+
+`MainWindow.settings`(`QSettings`)は組織名/アプリ名を `QCoreApplication.setOrganizationName/setApplicationName`
+で設定してから引数無し `QSettings()` で作る。`QSettings("org", "app")` の2引数コンストラクタは常に
+NativeFormat 固定で、テストで `setDefaultFormat(IniFormat)` を当てても実レジストリに書きに行ってしまうため
+（実際に一度汚した→`.clear()`で除去した経緯あり）。テストの `win` フィクスチャは `tmp_path` を使い
+`QSettings.setDefaultFormat(IniFormat)` + `setPath(IniFormat, UserScope, tmp_path)` で隔離すること。
 
 ---
 

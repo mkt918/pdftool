@@ -101,8 +101,15 @@ def wait_until(cond, timeout: float = 10.0) -> bool:
 
 
 @pytest.fixture
-def win(app):
+def win(app, tmp_path: Path):
+    from PySide6.QtCore import QSettings
+
     from pdftool.ui.main_window import MainWindow
+
+    # MainWindow は QSettings("pdftool", "PDFUtility") で実レジストリに書き込む。
+    # テストでユーザーの実際の設定を汚さないよう、一時フォルダの ini ファイルへ逃がす。
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
 
     w = MainWindow()
     w._confirm_discard = lambda: True  # モーダルは offscreen で固まるので潰す

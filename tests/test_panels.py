@@ -6,6 +6,7 @@ Ghostscript を使う経路は run_ghostscript / find_ghostscript を差し替�
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -68,6 +69,28 @@ def test_compress_panel_preset_run(monkeypatch, win: MainWindow, tmp_path: Path)
     assert "完了" in panel.status_label.text()
     assert panel.open_folder_btn.isVisible()
     assert panel.run_btn.isEnabled()
+
+
+def test_compress_panel_locks_inputs_while_running(monkeypatch, win: MainWindow, tmp_path: Path):
+    def slow_run(gs, src, dst, params, cancel=None):
+        time.sleep(0.3)
+        dst.write_bytes(b"x" * MB)
+        return MB
+
+    monkeypatch.setattr(C, "run_ghostscript", slow_run)
+    monkeypatch.setattr(C, "find_ghostscript", lambda: Path("C:/fake/gs.exe"))
+    win.gs_path = Path("C:/fake/gs.exe")
+    panel = compress_panel(win)
+    panel._update_gs_state()
+    win.open_pdf(make_image_pdf(tmp_path / "ロック確認.pdf", pages=1))
+    panel.run_btn.click()
+    assert not panel.radio_target.isEnabled()
+    assert not panel.target_spin.isEnabled()
+    assert not panel.preset_combo.isEnabled()
+    assert wait_until(lambda: "完了" in panel.status_label.text(), timeout=5)
+    assert panel.radio_target.isEnabled()
+    assert panel.target_spin.isEnabled()  # 目標サイズモードのまま戻る
+    assert not panel.preset_combo.isEnabled()
 
 
 def test_compress_panel_target_run_and_cancel_ui_reset(monkeypatch, win: MainWindow, tmp_path: Path):

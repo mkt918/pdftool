@@ -205,5 +205,13 @@ class ThumbnailWorker(QThread):
             except PdfError as e:
                 self.failed.emit(req.key, e.message)
             except Exception as e:  # noqa: BLE001
+                # 想定外の失敗はキャッシュ済みドキュメントの状態が怪しいので捨てる。
+                # 持ち越すと以降そのファイルの全ページで失敗し続けかねない。
+                doc = self._docs.pop(req.source_path, None)
+                if doc is not None:
+                    try:
+                        doc.close()
+                    except Exception:
+                        pass
                 self.failed.emit(req.key, f"{type(e).__name__}: {e}")
         self._close_all()

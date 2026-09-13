@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QSize, Qt, QThreadPool
+from PySide6.QtCore import QCoreApplication, QSettings, QSize, Qt, QThreadPool
 from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QScrollArea,
     QSplitter,
     QTabWidget,
@@ -57,6 +58,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_TITLE)
         self.resize(1200, 800)
         self.setAcceptDrops(True)
+
+        # --- 設定の永続化（サムネイルサイズ・最後に使ったフォルダなど） ---
+        # 組織名/アプリ名を先に設定してから引数無しで作る。
+        # QSettings(org, app) の2引数版は常に NativeFormat 固定で、テストで
+        # setDefaultFormat(IniFormat) を当てても効かない（実レジストリを触ってしまう）ため。
+        QCoreApplication.setOrganizationName("pdftool")
+        QCoreApplication.setApplicationName("PDFUtility")
+        self.settings = QSettings()
 
         # --- Ghostscript 検出（無ければ圧縮だけ無効化） ---
         self.gs_path: Path | None = find_ghostscript()
@@ -123,13 +132,18 @@ class MainWindow(QMainWindow):
         self.act_rot_l = act("左回転", lambda: self._rotate(-90), "Ctrl+Left", "選択ページを左に 90° 回転")
         self.act_rot_r = act("右回転", lambda: self._rotate(90), "Ctrl+Right", "選択ページを右に 90° 回転")
         self.act_delete = act("削除", self._delete, "Delete", "選択ページを削除")
+        self.act_select_all = act(
+            "全選択", self._select_all, QKeySequence.StandardKey.SelectAll, "すべてのページを選択"
+        )
         tb.addSeparator()
         tb.addWidget(QLabel(" サムネイル: "))
         self.size_combo = QComboBox()
         for name in THUMB_SIZES:
             self.size_combo.addItem(name)
-        self.size_combo.setCurrentText("中")
-        self.size_combo.currentTextChanged.connect(lambda n: self.view.set_thumbnail_width(THUMB_SIZES[n]))
+        saved_size = self.settings.value("thumb_size", "中")
+        self.size_combo.setCurrentText(saved_size if saved_size in THUMB_SIZES else "中")
+        self.view.set_thumbnail_width(THUMB_SIZES[self.size_combo.currentText()])
+        self.size_combo.currentTextChanged.connect(self._on_thumb_size_changed)
         tb.addWidget(self.size_combo)
 
     def _build_statusbar(self) -> None:
@@ -137,14 +151,37 @@ class MainWindow(QMainWindow):
         self.lbl_doc = QLabel("PDF を開いてください（ドラッグ&ドロップ可）")
         sb.addWidget(self.lbl_doc, 1)
         self.lbl_gs = QLabel()
+        sb.addPermanentWidget(self.lbl_gs)
+        self.gs_recheck_btn = QPushButton("再検出")
+        self.gs_recheck_btn.setFlat(True)
+        self.gs_recheck_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.gs_recheck_btn.clicked.connect(self._recheck_ghostscript)
+        sb.addPermanentWidget(self.gs_recheck_btn)
+        self._update_gs_label()
+
+    def _update_gs_label(self) -> None:
         if self.gs_path:
             self.lbl_gs.setText(f"Ghostscript {self.gs_version or ''}".strip())
+            self.lbl_gs.setStyleSheet("")
             self.lbl_gs.setToolTip(str(self.gs_path))
+            self.gs_recheck_btn.setVisible(False)
         else:
             self.lbl_gs.setText("Ghostscript 未検出 — 圧縮機能は使えません")
             self.lbl_gs.setStyleSheet("color: #b00;")
             self.lbl_gs.setToolTip("README の手順でインストールしてください（winget または公式インストーラ）")
-        sb.addPermanentWidget(self.lbl_gs)
+            self.gs_recheck_btn.setVisible(True)
+
+    def _recheck_ghostscript(self) -> None:
+        """インストール後に再起動しなくても検出し直せるようにする。"""
+        getattr(find_ghostscript, "cache_clear", lambda: None)()
+        self.gs_path = find_ghostscript()
+        self.gs_version = ghostscript_version(self.gs_path) if self.gs_path else None
+        self._update_gs_label()
+        for p in self.panels:
+            p.on_document_changed()
+        self.statusBar().showMessage(
+            "Ghostscript を検出しました。" if self.gs_path else "Ghostscript が見つかりませんでした。", 5000
+        )
 
     # ------------------------------------------------------------------
     # 状態
@@ -241,12 +278,17 @@ class MainWindow(QMainWindow):
         return n is not None
 
     def open_dialog(self) -> None:
-        f, _ = QFileDialog.getOpenFileName(self, "PDF を開く", "", "PDF (*.pdf)")
+        start = self.settings.value("last_dir", "")
+        f, _ = QFileDialog.getOpenFileName(self, "PDF を開く", start, "PDF (*.pdf)")
         if f:
+            self.settings.setValue("last_dir", str(Path(f).parent))
             self.open_pdf(f)
 
     def append_dialog(self) -> None:
-        files, _ = QFileDialog.getOpenFileNames(self, "結合する PDF を選ぶ", "", "PDF (*.pdf)")
+        start = self.settings.value("last_dir", "")
+        files, _ = QFileDialog.getOpenFileNames(self, "結合する PDF を選ぶ", start, "PDF (*.pdf)")
+        if files:
+            self.settings.setValue("last_dir", str(Path(files[0]).parent))
         for f in files:
             if not self.append_pdf(f):
                 break
@@ -291,6 +333,15 @@ class MainWindow(QMainWindow):
             self.model.remove_pages(rows)
         except ValueError as e:
             self.show_error(str(e))
+
+    def _select_all(self) -> None:
+        pl = self.page_list
+        if pl:
+            self.view.select_rows(range(len(pl)))
+
+    def _on_thumb_size_changed(self, name: str) -> None:
+        self.view.set_thumbnail_width(THUMB_SIZES[name])
+        self.settings.setValue("thumb_size", name)
 
     # ------------------------------------------------------------------
     # ワーカー起動口（パネルから使う）
@@ -367,8 +418,19 @@ class MainWindow(QMainWindow):
         if self.page_list is not None and self.page_list.is_modified and not self._confirm_discard():
             e.ignore()
             return
+        if self._workers:
+            r = QMessageBox.question(
+                self, "確認",
+                f"実行中の処理が {len(self._workers)} 件あります。中断して終了しますか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if r != QMessageBox.StandardButton.Yes:
+                e.ignore()
+                return
+            for w in list(self._workers):
+                w.cancel()
         self.thumb_worker.stop()
-        QThreadPool.globalInstance().waitForDone(3000)
+        QThreadPool.globalInstance().waitForDone(5000)
         super().closeEvent(e)
 
 
