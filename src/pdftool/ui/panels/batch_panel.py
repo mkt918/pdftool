@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pdftool.core.batch import BatchProgress, BatchResult, batch_compress, batch_export
+from pdftool.core.batch import BatchProgress, BatchResult, batch_compress, batch_export, list_pdfs
 from pdftool.core.compress import format_size
 from pdftool.core.export import ExportOptions
 from pdftool.ui.panels.base import PanelBase
@@ -52,19 +52,31 @@ class BatchPanel(PanelBase):
 
         lay = QVBoxLayout(self)
 
+        intro = QLabel(
+            "現在開いているPDFとは関係なく、指定したフォルダの中身をまとめて処理します。"
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #666;")
+        lay.addWidget(intro)
+
+        folder_box = QGroupBox("① 対象フォルダ")
+        folder_lay = QVBoxLayout(folder_box)
         folder_row = QHBoxLayout()
         self.folder_edit = QLineEdit()
-        self.folder_edit.setPlaceholderText("処理するフォルダ")
+        self.folder_edit.setPlaceholderText("処理するフォルダを選んでください")
         folder_row.addWidget(self.folder_edit)
         self.browse_btn = QPushButton("参照…")
         self.browse_btn.clicked.connect(self._browse)
         folder_row.addWidget(self.browse_btn)
-        lay.addLayout(folder_row)
-
+        folder_lay.addLayout(folder_row)
         self.recursive_check = QCheckBox("サブフォルダも対象にする")
-        lay.addWidget(self.recursive_check)
+        folder_lay.addWidget(self.recursive_check)
+        self.folder_status_label = QLabel()
+        self.folder_status_label.setWordWrap(True)
+        folder_lay.addWidget(self.folder_status_label)
+        lay.addWidget(folder_box)
 
-        mode_box = QGroupBox("処理内容")
+        mode_box = QGroupBox("② 処理内容")
         mode_lay = QVBoxLayout(mode_box)
         self.radio_compress = QRadioButton("圧縮")
         self.radio_export = QRadioButton("画像書き出し")
@@ -80,7 +92,7 @@ class BatchPanel(PanelBase):
         lay.addWidget(mode_box)
 
         btn_row = QHBoxLayout()
-        self.run_btn = QPushButton("実行")
+        self.run_btn = QPushButton("③ この内容で実行")
         self.run_btn.clicked.connect(self._run)
         btn_row.addWidget(self.run_btn)
         self.cancel_btn = QPushButton("キャンセル")
@@ -106,6 +118,18 @@ class BatchPanel(PanelBase):
         self.open_folder_btn.setVisible(False)
         self.open_folder_btn.clicked.connect(self._open_target_folder)
         lay.addWidget(self.open_folder_btn)
+
+        # 何が起きるか（対象件数・実行内容）を先に見せる。実行してから気づくより分かりやすいので。
+        for w in (self.folder_edit,):
+            w.textChanged.connect(self._update_summary)
+        for w in (self.recursive_check, self.radio_compress, self.radio_export,
+                  self.c_radio_target, self.c_radio_preset):
+            w.toggled.connect(self._update_summary)
+        self.c_target_spin.valueChanged.connect(self._update_summary)
+        self.c_preset_combo.currentIndexChanged.connect(self._update_summary)
+        self.e_dpi_spin.valueChanged.connect(self._update_summary)
+        self.e_fmt_combo.currentIndexChanged.connect(self._update_summary)
+        self._update_summary()
 
     # -- サブオプション -----------------------------------------------------
     def _build_compress_options(self) -> QWidget:
@@ -158,8 +182,52 @@ class BatchPanel(PanelBase):
         start = self.window_.settings.value("last_batch_dir", "")
         d = QFileDialog.getExistingDirectory(self, "処理するフォルダを選ぶ", start)
         if d:
-            self.folder_edit.setText(d)
+            self.folder_edit.setText(d)  # -> _update_summary が textChanged 経由で呼ばれる
             self.window_.settings.setValue("last_batch_dir", d)
+
+    def _update_summary(self, *_args) -> None:
+        """フォルダの状態と、実行すると何件・何をするかを実行前に一目でわかるようにする。"""
+        if self._worker is not None:
+            return  # 実行中は入力欄がロックされているのでそのまま
+        folder = self.folder_edit.text().strip()
+        if not folder:
+            self.folder_status_label.setText("フォルダを指定すると、対象件数がここに表示されます")
+            self.folder_status_label.setStyleSheet("color: #666;")
+            self.run_btn.setEnabled(False)
+            return
+        folder_path = Path(folder)
+        if not folder_path.is_dir():
+            self.folder_status_label.setText("⚠ フォルダが見つかりません")
+            self.folder_status_label.setStyleSheet("color: #b00;")
+            self.run_btn.setEnabled(False)
+            return
+        pdfs = list_pdfs(folder_path, self.recursive_check.isChecked())
+        if not pdfs:
+            self.folder_status_label.setText("⚠ このフォルダに PDF が見つかりません")
+            self.folder_status_label.setStyleSheet("color: #b00;")
+            self.run_btn.setEnabled(False)
+            return
+        if self.radio_compress.isChecked() and self.window_.gs_path is None:
+            self.folder_status_label.setText(
+                f"{len(pdfs)} 件の PDF が見つかりました（⚠ Ghostscript未検出のため圧縮はできません）"
+            )
+            self.folder_status_label.setStyleSheet("color: #b00;")
+            self.run_btn.setEnabled(False)
+            return
+
+        if self.radio_compress.isChecked():
+            mode = "圧縮"
+            detail = (
+                f"目標 {self.c_target_spin.value():.0f}MB以下"
+                if self.c_radio_target.isChecked()
+                else f"プリセット「{self.c_preset_combo.currentText()}」"
+            )
+        else:
+            mode = "画像書き出し"
+            detail = f"{self.e_dpi_spin.value()}dpi・{self.e_fmt_combo.currentText()}"
+        self.folder_status_label.setText(f"✓ {len(pdfs)} 件の PDF を{mode}します（{detail}）")
+        self.folder_status_label.setStyleSheet("color: #076b07;")
+        self.run_btn.setEnabled(True)
 
     # -- 実行 -------------------------------------------------------------
     def _run(self) -> None:
@@ -240,10 +308,10 @@ class BatchPanel(PanelBase):
 
     def _reset_running_state(self) -> None:
         self._worker = None
-        self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.progress.setVisible(False)
         self._set_running_ui(False)
+        self._update_summary()  # run_btn の有効/無効も含め、現在のフォルダ状態に合わせ直す
 
     def _on_finished(self, result: BatchResult) -> None:
         self._reset_running_state()

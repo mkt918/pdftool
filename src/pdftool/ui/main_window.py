@@ -83,7 +83,7 @@ class MainWindow(QMainWindow):
         # --- 機能タブ ---
         self.tabs = QTabWidget()
         self.panels: list[PanelBase] = []
-        for panel_cls in (CompressPanel, ExportPanel, PageOpsPanel, BatchPanel):
+        for panel_cls in (ExportPanel, CompressPanel, PageOpsPanel, BatchPanel):
             self._add_panel(panel_cls(self))
 
         splitter = QSplitter(Qt.Orientation.Horizontal)

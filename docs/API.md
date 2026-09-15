@@ -353,12 +353,17 @@ class ThumbnailModel(QAbstractListModel):
     def undo() -> bool / redo() -> bool
     # data(): DisplayRole=ページ番号, DecorationRole=QPixmap（未描画はプレースホルダ）, UserRole=PageRef
 
+class ThumbnailDelegate(QStyledItemDelegate):
+    # 選択中のセルに太い枠（BORDER_COLOR/BORDER_WIDTH）を上書き描画する（2026-09-15〜）。
+    # 既定の背景ハイライトだけだとサムネイル画像に隠れて選択が分かりにくかったため
+
 class ThumbnailView(QListView):
     page_activated: Signal(int)          # ダブルクリック
     selection_changed: Signal(list)      # 選択行（昇順）
     def selected_rows(self) -> list[int]
     def select_rows(self, rows)
     def set_thumbnail_width(self, width)
+    # setItemDelegate(ThumbnailDelegate(...)) 済み
 ```
 
 ### ui/main_window.py
@@ -406,13 +411,22 @@ class PanelBase(QWidget):
 
 ### Phase 4 で実装したパネル（ui/panels/*.py）
 
-- `CompressPanel`: 目標サイズ / プリセットで `window_.current_source()` を圧縮。出力先は常に元と同じフォルダ。
-  目標サイズの初期値は 28MB(多くのアップロード先にある30MB制限を意識した値。2026-09-12〜)
+タブの表示順は `MainWindow.__init__` の `for panel_cls in (ExportPanel, CompressPanel, PageOpsPanel, BatchPanel)`
+で決まる（2026-09-15〜、画像書き出しが最初。それまでは圧縮が最初だった）。
+`win.panels[N]` のインデックスもこの順（テストの `export_panel()`/`compress_panel()` 等のヘルパー参照）。
+
 - `ExportPanel`: 全ページ / 選択ページ / 範囲指定(`parse_page_spec`) で `export_refs` を実行（pageops の回転・並べ替えを反映）。
   左のサムネイル選択と「対象ページ」コンボは自動連動する(選択あり→選択ページ、選択解除→全ページ)。
   「範囲指定」を選んでいる間はこの自動連動を止める(手動入力を上書きしない)。既定 dpi は 200(2026-09-12〜)
+- `CompressPanel`: 目標サイズ / プリセットで `window_.current_source()` を圧縮。出力先は常に元と同じフォルダ。
+  目標サイズの初期値は 28MB(多くのアップロード先にある30MB制限を意識した値。2026-09-12〜)
 - `PageOpsPanel`: 範囲指定選択、任意位置への PDF 挿入（`model.insert_pdf`）、分割（`page_list.export_subset` / `export_split_all`、別スレッド実行）
-- `BatchPanel`: フォルダ指定で `batch_compress` / `batch_export`。結果は `QTableWidget` に一覧表示、キャンセル時は `partial` があれば表示する
+- `BatchPanel`: フォルダ指定で `batch_compress` / `batch_export`。結果は `QTableWidget` に一覧表示、キャンセル時は `partial` があれば表示する。
+  2026-09-15〜「①対象フォルダ→②処理内容→③実行」の3ステップ構成に変更。`folder_edit`/`recursive_check`/
+  各モードの設定が変わるたびに `_update_summary()` が `list_pdfs()` で対象件数を数え直し、
+  `folder_status_label` に「◯件のPDFを○○します」と実行前プレビューを表示、`run_btn` の有効/無効も
+  それに応じて自動更新する（フォルダ未指定・無効・PDF無し・Ghostscript無しなら押せない）。
+  クリックしてからエラーダイアログを出す方式はやめ、事前に分かるようにした
 
 いずれも `PanelBase` を継承し、`window_.run_worker()` 経由でのみ core を呼ぶ。
 `QMessageBox` 等のモーダルは offscreen テストでは固まるため、テストでは `window_.show_error` を monkeypatch すること。

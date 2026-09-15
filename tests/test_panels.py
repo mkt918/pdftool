@@ -27,11 +27,11 @@ def fake_gs(monkeypatch, size_bytes: int = 1 * MB):
     monkeypatch.setattr(C, "find_ghostscript", lambda: Path("C:/fake/gs.exe"))
 
 
-def compress_panel(win: MainWindow):
+def export_panel(win: MainWindow):
     return win.panels[0]
 
 
-def export_panel(win: MainWindow):
+def compress_panel(win: MainWindow):
     return win.panels[1]
 
 
@@ -60,6 +60,7 @@ def test_compress_panel_preset_run(monkeypatch, win: MainWindow, tmp_path: Path)
     fake_gs(monkeypatch)
     win.gs_path = Path("C:/fake/gs.exe")
     panel = compress_panel(win)
+    win.tabs.setCurrentWidget(panel)  # 非表示タブは isVisible() が常に False になるため
     panel._update_gs_state()
     pdf = make_image_pdf(tmp_path / "圧縮 対象.pdf", pages=2)
     win.open_pdf(pdf)
@@ -241,10 +242,36 @@ def test_batch_panel_export(win: MainWindow, tmp_path: Path):
     assert panel.table.item(0, 3).text() == "OK"
 
 
-def test_batch_panel_missing_folder_shows_error(win: MainWindow, tmp_path: Path, monkeypatch):
+def test_batch_panel_missing_folder_disables_run(win: MainWindow, tmp_path: Path):
+    """フォルダが無効なら、クリックしてからエラーになるのではなく事前に実行不可にする。"""
     panel = batch_panel(win)
-    errors = []
-    monkeypatch.setattr(win, "show_error", lambda msg, title="エラー": errors.append(msg))
     panel.folder_edit.setText(str(tmp_path / "ない"))
-    panel.run_btn.click()
-    assert errors and "フォルダが見つかりません" in errors[0]
+    assert not panel.run_btn.isEnabled()
+    assert "見つかりません" in panel.folder_status_label.text()
+
+
+def test_batch_panel_summary_updates_with_valid_folder(win: MainWindow, tmp_path: Path):
+    d = tmp_path / "対象"
+    d.mkdir()
+    make_image_pdf(d / "a.pdf", pages=1)
+    make_image_pdf(d / "b.pdf", pages=1)
+    panel = batch_panel(win)
+    panel.folder_edit.setText(str(d))
+    assert panel.run_btn.isEnabled()
+    assert "2 件" in panel.folder_status_label.text()
+    assert "圧縮" in panel.folder_status_label.text()
+
+    panel.radio_export.setChecked(True)
+    assert "画像書き出し" in panel.folder_status_label.text()
+
+
+def test_batch_panel_run_disabled_without_gs(win: MainWindow, tmp_path: Path):
+    d = tmp_path / "対象"
+    d.mkdir()
+    make_image_pdf(d / "a.pdf", pages=1)
+    panel = batch_panel(win)
+    win.gs_path = None
+    panel.folder_edit.setText(str(d))
+    panel.radio_compress.setChecked(True)
+    assert not panel.run_btn.isEnabled()
+    assert "Ghostscript" in panel.folder_status_label.text()

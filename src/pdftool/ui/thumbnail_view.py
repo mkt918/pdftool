@@ -28,8 +28,14 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QDropEvent, QImage, QPainter, QPixmap, QPixmapCache
-from PySide6.QtWidgets import QAbstractItemView, QListView, QWidget
+from PySide6.QtGui import QColor, QDropEvent, QImage, QPainter, QPen, QPixmap, QPixmapCache
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QListView,
+    QStyle,
+    QStyledItemDelegate,
+    QWidget,
+)
 
 from pdftool.core.pageops import PageList, PageRef
 from pdftool.utils.worker import ThumbnailWorker, ThumbRequest
@@ -229,6 +235,31 @@ class ThumbnailModel(QAbstractListModel):
         return True
 
 
+class ThumbnailDelegate(QStyledItemDelegate):
+    """選択状態を分かりやすくする。
+
+    既定の QListView は選択時に背景色を薄く変えるだけで、サムネイル画像自体が
+    その背景を覆ってしまい「選択したかどうか」が見た目でほぼ分からなかった
+    （2026-09-15 ユーザー指摘）。画像の上から太い枠で囲むことで、画像の内容に
+    関係なく選択中だとはっきり分かるようにする。
+    """
+
+    BORDER_COLOR = QColor(0, 90, 200)  # 既定のハイライトより濃い、はっきりした青
+    BORDER_WIDTH = 4
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        super().paint(painter, option, index)
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.save()
+            pen = QPen(self.BORDER_COLOR)
+            pen.setWidth(self.BORDER_WIDTH)
+            painter.setPen(pen)
+            w = self.BORDER_WIDTH
+            rect = option.rect.adjusted(w // 2, w // 2, -(w // 2) - 1, -(w // 2) - 1)
+            painter.drawRect(rect)
+            painter.restore()
+
+
 class ThumbnailView(QListView):
     """IconMode のグリッド。複数選択、D&D 並べ替え、ダブルクリック。"""
 
@@ -239,6 +270,7 @@ class ThumbnailView(QListView):
         super().__init__(parent)
         self._model = model
         self.setModel(model)
+        self.setItemDelegate(ThumbnailDelegate(self))
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setResizeMode(QListView.ResizeMode.Adjust)
         self.setMovement(QListView.Movement.Static)   # 位置は自前の dropEvent で決める
