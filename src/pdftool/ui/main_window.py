@@ -78,6 +78,7 @@ class MainWindow(QMainWindow):
         self.view = ThumbnailView(self.model)
         self.view.page_activated.connect(self._preview_page)
         self.view.selection_changed.connect(self._on_selection_changed)
+        self.view.files_dropped.connect(self._on_files_dropped)
         self.model.page_list_changed.connect(self._on_document_changed)
 
         # --- 機能タブ ---
@@ -277,6 +278,35 @@ class MainWindow(QMainWindow):
         n, password = self._load_with_password(lambda pw: self.model.append_pdf(path, pw), path)
         return n is not None
 
+    def insert_pdfs(self, paths: list[Path], at: int) -> int:
+        """PDF を at 番目の直前へ順に結合する（ドロップ結合用）。結合したページ数を返す。
+
+        パスワード付き・破損など読めないファイルはそこで止め、それまでの分は結合済みのまま残す。
+        """
+        pl = self.page_list
+        if pl is None or len(pl) == 0:
+            return 0
+        start = at = max(0, min(at, len(pl)))
+        for path in paths:
+            n, _pw = self._load_with_password(lambda pw, p=path, a=at: self.model.insert_pdf(p, a, pw), path)
+            if n is None:
+                break
+            at += n
+        total = at - start
+        if total:
+            self.view.select_rows(range(start, at))
+            self.statusBar().showMessage(f"{total} ページを結合しました（{len(paths)} ファイル）", 6000)
+        return total
+
+    def _on_files_dropped(self, paths: list, at: int, replace: bool) -> None:
+        """PDF ファイルのドロップ。文書を開いていれば結合、Shift 押下か未オープンなら開く。"""
+        paths = [Path(p) for p in paths]
+        if self.page_list is None or len(self.page_list) == 0 or replace:
+            if self.open_pdf(paths[0]) and len(paths) > 1:
+                self.insert_pdfs(paths[1:], len(self.page_list))
+        else:
+            self.insert_pdfs(paths, at)
+
     def open_dialog(self) -> None:
         start = self.settings.value("last_dir", "")
         f, _ = QFileDialog.getOpenFileName(self, "PDF を開く", start, "PDF (*.pdf)")
@@ -407,11 +437,11 @@ class MainWindow(QMainWindow):
         paths = [Path(u.toLocalFile()) for u in e.mimeData().urls() if u.toLocalFile().lower().endswith(".pdf")]
         if not paths:
             return
-        # 1 つ目は開く、残りは結合
-        if self.open_pdf(paths[0]):
-            for p in paths[1:]:
-                if not self.append_pdf(p):
-                    break
+        # サムネイル以外（余白・タブ等）へのドロップは末尾に結合。未オープンなら開く。
+        # Shift 押下なら（開いていても）開き直す。
+        replace = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        at = len(self.page_list) if self.page_list is not None else 0
+        self._on_files_dropped(paths, at, replace)
         e.acceptProposedAction()
 
     def closeEvent(self, e: QCloseEvent) -> None:

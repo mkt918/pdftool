@@ -23,6 +23,7 @@ from PySide6.QtCore import (
     QItemSelection,
     QItemSelectionModel,
     QModelIndex,
+    QLine,
     QPoint,
     QSize,
     Qt,
@@ -265,10 +266,13 @@ class ThumbnailView(QListView):
 
     page_activated = Signal(int)       # ダブルクリックされた行
     selection_changed = Signal(list)   # 選択行（昇順）
+    files_dropped = Signal(list, int, bool)   # (PDF パスのリスト, 挿入位置, Shift押下=開き直し)
 
     def __init__(self, model: ThumbnailModel, parent: QWidget | None = None):
         super().__init__(parent)
         self._model = model
+        self._internal_drag = False
+        self._drop_line: QLine | None = None
         self.setModel(model)
         self.setItemDelegate(ThumbnailDelegate(self))
         self.setViewMode(QListView.ViewMode.IconMode)
@@ -281,7 +285,7 @@ class ThumbnailView(QListView):
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
+        self.setDropIndicatorShown(False)   # 挿入位置は paintEvent で自前描画
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         # 保険: 万一 Qt 側が MoveAction 後処理に入っても removeRows ではなく setData（無効）になる
@@ -317,28 +321,127 @@ class ThumbnailView(QListView):
             sel.select(idx, idx)
         sm.select(sel, QItemSelectionModel.SelectionFlag.Select)
 
-    # -- D&D 並べ替え -----------------------------------------------------------
+    # -- D&D（並べ替え / PDF ファイルのドロップ結合） ---------------------------
+    # 内部ドラッグ（サムネイルの並べ替え）は startDrag の間だけ _internal_drag が立つ。
+    # 外部ドラッグ（エクスプローラーからの PDF）は mimeData の URL で判定する。
+    # どちらも Qt 既定の受け入れ判定（アイテム上のドロップは拒否される等）に頼らず、
+    # drag*Event で自前で accept し、挿入位置を縦線で見せる。
+
+    def startDrag(self, supportedActions) -> None:
+        self._internal_drag = True
+        try:
+            super().startDrag(supportedActions)
+        finally:
+            self._internal_drag = False
+            self._clear_drop_hint()
+
+    @staticmethod
+    def _pdf_paths(mime) -> list[Path]:
+        if mime is None or not mime.hasUrls():
+            return []
+        paths = [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile()]
+        return [p for p in paths if p.suffix.lower() == ".pdf"]
+
+    def _drop_target(self, pos: QPoint) -> tuple[int, QLine | None]:
+        """ドロップ位置 → (挿入位置 to, 表示する縦線)。to は「元リストの to 番目の直前」。"""
+        n = self._model.rowCount()
+        if n == 0:
+            return 0, None
+        x, y = pos.x(), pos.y()
+        rects = [self.visualRect(self._model.index(r)) for r in range(n)]
+        band = [r for r in range(n) if rects[r].top() <= y <= rects[r].bottom()]
+        if not band:
+            if y > rects[-1].bottom():
+                band = [n - 1]
+                x = rects[-1].right() + 1          # 最下行より下 → 末尾
+            elif y < rects[0].top():
+                band = [0]
+                x = rects[0].left() - 1            # 最上行より上 → 先頭
+            else:                                  # 行間の隙間 → いちばん近い行
+                nearest = min(range(n), key=lambda r: abs(rects[r].center().y() - y))
+                band = [r for r in range(n) if rects[r].top() == rects[nearest].top()]
+        for r in band:
+            rc = rects[r]
+            if x < rc.center().x():
+                return r, QLine(rc.left(), rc.top(), rc.left(), rc.bottom())
+        rc = rects[band[-1]]
+        return band[-1] + 1, QLine(rc.right(), rc.top(), rc.right(), rc.bottom())
+
     def _drop_row(self, pos: QPoint) -> int:
-        """ドロップ位置を「元リスト上の位置 to（この直前に挿入）」に変換する。"""
-        idx = self.indexAt(pos)
-        if not idx.isValid():
-            # 空白部分: 直近のアイテムを探す（同じ行の右端 or 末尾）
-            return self._model.rowCount()
-        rect = self.visualRect(idx)
-        return idx.row() if pos.x() < rect.center().x() else idx.row() + 1
+        return self._drop_target(pos)[0]
+
+    def _set_drop_hint(self, line: QLine | None) -> None:
+        if line != self._drop_line:
+            self._drop_line = line
+            self.viewport().update()
+
+    def _clear_drop_hint(self) -> None:
+        self._set_drop_hint(None)
+
+    def _autoscroll_for_drag(self, pos: QPoint) -> None:
+        bar, margin = self.verticalScrollBar(), 36
+        if pos.y() < margin:
+            bar.setValue(bar.value() - 20)
+        elif pos.y() > self.viewport().height() - margin:
+            bar.setValue(bar.value() + 20)
+
+    def _accepts(self, event) -> bool:
+        return self._internal_drag or bool(self._pdf_paths(event.mimeData()))
+
+    def dragEnterEvent(self, event) -> None:
+        if self._accepts(event):
+            event.setDropAction(Qt.DropAction.MoveAction if self._internal_drag else Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if not self._accepts(event):
+            event.ignore()
+            self._clear_drop_hint()
+            return
+        pos = event.position().toPoint()
+        self._set_drop_hint(self._drop_target(pos)[1])
+        self._autoscroll_for_drag(pos)
+        event.setDropAction(Qt.DropAction.MoveAction if self._internal_drag else Qt.DropAction.CopyAction)
+        event.accept()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._clear_drop_hint()
+        super().dragLeaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self._drop_line is not None:
+            p = QPainter(self.viewport())
+            pen = QPen(ThumbnailDelegate.BORDER_COLOR)
+            pen.setWidth(4)
+            p.setPen(pen)
+            p.drawLine(self._drop_line)
+            p.end()
 
     def dropEvent(self, event: QDropEvent) -> None:
-        if event.source() is not self:
+        pos = event.position().toPoint()
+        to = self._drop_row(pos)
+        self._clear_drop_hint()
+
+        paths = self._pdf_paths(event.mimeData())
+        if paths and not self._internal_drag:
+            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            self.files_dropped.emit(paths, to, shift)
+            return
+
+        if not self._internal_drag:
             event.ignore()
             return
         rows = self.selected_rows()
         if not rows:
             event.ignore()
             return
-        to = self._drop_row(event.position().toPoint())
         n = len(rows)
         self._model.move_pages(rows, to)
-        # 移動後の位置を再選択
         insert_at = to - sum(1 for r in rows if r < to)
         self.select_rows(range(insert_at, insert_at + n))
         event.setDropAction(Qt.DropAction.IgnoreAction)   # 既定の removeRows を走らせない

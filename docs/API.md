@@ -459,3 +459,26 @@ NativeFormat 固定で、テストで `setDefaultFormat(IniFormat)` を当てて
   Ghostscript の同梱についても、`ProgramFiles`/`ProgramFiles(x86)` を存在しないパスに向けて外部検出を
   塞いだ状態で実際に起動し、`_MEIPASS` に展開された `gs/bin/gswin64c.exe` が実際に PDF 変換に
   成功することを確認済み（外部インストール無しで単体動作する）
+
+
+---
+
+## ドラッグ&ドロップ（2026-10-06〜）
+
+`ThumbnailView` は Qt 既定の受け入れ判定（アイテム上のドロップを拒否する等）に頼らず、
+`dragEnterEvent`/`dragMoveEvent`/`dropEvent` を自前で処理する。
+
+- 内部ドラッグ（並べ替え）は `startDrag()` の間だけ `_internal_drag` が True。`event.source()` は使わない
+  （合成イベントのテストでも判定できるように）。ドロップ時は `model.move_pages(rows, to)` →
+  移動後の位置を再選択。`setDropAction(IgnoreAction)` で Qt 既定の `removeRows` を走らせない
+- 外部ドラッグ（エクスプローラー等からの PDF）は `mimeData().hasUrls()` で判定し、`.pdf` のみ受け付け。
+  ドロップ時に `files_dropped(paths: list, to: int, shift: bool)` を emit。`MainWindow._on_files_dropped` が
+  文書あり → `insert_pdfs(paths, to)`（`model.insert_pdf` を順に、位置をずらしながら）、
+  文書なし/Shift → `open_pdf(paths[0])` + 残りを末尾に結合
+- `_drop_target(pos) -> (to, QLine)`: 行ごとの帯（y 範囲）の中で x がアイテム中心より左なら直前、
+  右なら直後。帯が無ければ先頭より上=0・最下行より下=末尾・行間=最寄りの行。
+  線は `paintEvent` で描画（`setDropIndicatorShown(False)`）。ドラッグ中は上下端でスクロール
+- `MainWindow.dropEvent`（サムネイル外）は末尾に結合
+- テスト: 実マウスによる QDrag は offscreen では即キャンセルされるため再現できない。
+  `QDropEvent` を合成してハンドラを直接呼ぶ（`QMimeData` は所有されないので参照を保持すること。
+  手放すと pytest の repr 時にクラッシュする）

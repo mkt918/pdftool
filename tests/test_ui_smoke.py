@@ -258,3 +258,121 @@ def test_screenshot(win: MainWindow, tmp_path: Path):
     if out:
         win.grab().save(out)
         assert Path(out).exists()
+
+
+# ---------------------------------------------------------------------------
+# ドラッグ&ドロップ（並べ替え / PDF ファイルのドロップ結合）
+# ---------------------------------------------------------------------------
+def _url_drop(view, paths, point, modifiers=Qt.KeyboardModifier.NoModifier):
+    from PySide6.QtCore import QMimeData, QPointF, QUrl
+    from PySide6.QtGui import QDropEvent
+
+    mime = QMimeData()
+    view._test_mime = mime   # 所有されないので生存を保証
+    mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
+    ev = QDropEvent(QPointF(point), Qt.DropAction.CopyAction, mime, Qt.MouseButton.LeftButton, modifiers)
+    view.dropEvent(ev)
+    return ev
+
+
+def _center(view, row):
+    return view.visualRect(view.model().index(row)).center()
+
+
+def test_drop_target_picks_insert_position(win: MainWindow, tmp_path: Path):
+    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=4))
+    win.show()
+    QApplication.processEvents()
+    v = win.view
+    r1 = v.visualRect(v.model().index(1))
+    from PySide6.QtCore import QPoint
+
+    # 1 番目の左半分 → 1 の直前、右半分 → 2 の直前
+    assert v._drop_target(r1.center() - QPoint(20, 0))[0] == 1
+    assert v._drop_target(r1.center() + QPoint(20, 0))[0] == 2
+    # 最後のアイテムの右・最下行より下 → 末尾
+    last = v.visualRect(v.model().index(3))
+    assert v._drop_target(QPoint(last.right() + 1, last.center().y()))[0] == 4
+    assert v._drop_target(QPoint(5, last.bottom() + 200))[0] == 4
+    # 先頭より上 → 0
+    assert v._drop_target(QPoint(5, -50))[0] == 0
+
+
+def test_dropping_pdf_files_inserts_at_drop_position(win: MainWindow, tmp_path: Path):
+    a = make_image_pdf(tmp_path / "a.pdf", pages=3)
+    b = make_image_pdf(tmp_path / "b.pdf", pages=2)
+    win.open_pdf(a)
+    win.show()
+    QApplication.processEvents()
+    from PySide6.QtCore import QPoint
+
+    # a の 1 ページ目(0) の右半分に落とす → 0 の直後 = 位置 1 に b の 2 ページが入る
+    p = _center(win.view, 0) + QPoint(20, 0)
+    _url_drop(win.view, [b], p)
+    names = [r.source_path.name for r in win.page_list.pages]
+    assert names == ["a.pdf", "b.pdf", "b.pdf", "a.pdf", "a.pdf"]
+    assert win.view.selected_rows() == [1, 2]   # 結合したページが選択される
+
+
+def test_dropping_multiple_pdfs_keeps_order(win: MainWindow, tmp_path: Path):
+    a = make_image_pdf(tmp_path / "a.pdf", pages=1)
+    b = make_image_pdf(tmp_path / "b.pdf", pages=1)
+    c = make_image_pdf(tmp_path / "c.pdf", pages=1)
+    win.open_pdf(a)
+    win.show()
+    QApplication.processEvents()
+    from PySide6.QtCore import QPoint
+
+    last = win.view.visualRect(win.view.model().index(0))
+    _url_drop(win.view, [b, c], QPoint(last.right() + 1, last.center().y()))
+    assert [r.source_path.name for r in win.page_list.pages] == ["a.pdf", "b.pdf", "c.pdf"]
+
+
+def test_dropping_pdf_without_document_opens_it(win: MainWindow, tmp_path: Path):
+    a = make_image_pdf(tmp_path / "a.pdf", pages=2)
+    b = make_image_pdf(tmp_path / "b.pdf", pages=1)
+    from PySide6.QtCore import QPoint
+
+    _url_drop(win.view, [a, b], QPoint(10, 10))
+    assert [r.source_path.name for r in win.page_list.pages] == ["a.pdf", "a.pdf", "b.pdf"]
+
+
+def test_shift_drop_replaces_document(win: MainWindow, tmp_path: Path):
+    a = make_image_pdf(tmp_path / "a.pdf", pages=2)
+    b = make_image_pdf(tmp_path / "b.pdf", pages=1)
+    win.open_pdf(a)
+    win.show()
+    QApplication.processEvents()
+    _url_drop(win.view, [b], _center(win.view, 0), Qt.KeyboardModifier.ShiftModifier)
+    assert [r.source_path.name for r in win.page_list.pages] == ["b.pdf"]
+
+
+def test_non_pdf_drop_is_ignored(win: MainWindow, tmp_path: Path):
+    a = make_image_pdf(tmp_path / "a.pdf", pages=2)
+    txt = tmp_path / "x.txt"
+    txt.write_text("hi")
+    win.open_pdf(a)
+    win.show()
+    QApplication.processEvents()
+    ev = _url_drop(win.view, [txt], _center(win.view, 0))
+    assert not ev.isAccepted()
+    assert len(win.page_list) == 2
+
+
+def test_internal_drag_reorders_pages(win: MainWindow, tmp_path: Path):
+    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=4))
+    win.show()
+    QApplication.processEvents()
+    from PySide6.QtCore import QMimeData, QPoint, QPointF
+    from PySide6.QtGui import QDropEvent
+
+    win.view.select_rows([0])
+    win.view._internal_drag = True          # 実際は startDrag の間だけ立つ
+    last = win.view.visualRect(win.view.model().index(3))
+    mime = QMimeData()   # QDropEvent は所有しないので参照を保持しておく
+    ev = QDropEvent(QPointF(last.right() + 1, last.center().y()), Qt.DropAction.MoveAction,
+                    mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    win.view.dropEvent(ev)
+    win.view._internal_drag = False
+    assert [r.source_index for r in win.page_list.pages] == [1, 2, 3, 0]
+    assert win.view.selected_rows() == [3]
