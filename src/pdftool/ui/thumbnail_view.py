@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from pdftool.core.images import is_image
 from pdftool.core.pageops import PageList, PageRef
 from pdftool.utils.worker import ThumbnailWorker, ThumbRequest
 
@@ -48,7 +49,7 @@ QPixmapCache.setCacheLimit(256 * 1024)  # KB。180px なら 1000 ページ以上
 
 
 def _cache_key(ref: PageRef, width: int) -> str:
-    return f"{ref.source_path}|{ref.source_index}|{ref.rotation}|{width}"
+    return f"{ref.source_path}|{ref.source_index}|{ref.rotation}|{ref.crop}|{width}"
 
 
 def _placeholder(width: int) -> QPixmap:
@@ -152,7 +153,7 @@ class ThumbnailModel(QAbstractListModel):
             return pm
         if key not in self._pending and key not in self._failed:
             self._pending.add(key)
-            self._worker.request(ThumbRequest(key, ref.source_path, ref.source_index, ref.rotation, self._width))
+            self._worker.request(ThumbRequest(key, ref.source_path, ref.source_index, ref.rotation, self._width, ref.crop))
         return self._placeholder
 
     def _rows_for_key(self, key: str) -> list[int]:
@@ -195,6 +196,16 @@ class ThumbnailModel(QAbstractListModel):
         rows = sorted(set(rows))
         self._page_list.rotate(rows, delta)
         for r in rows:
+            idx = self.index(r)
+            self.dataChanged.emit(idx, idx)
+        self._after_change()
+
+    def set_crops(self, mapping: dict) -> None:
+        """トリミング余白を設定/解除する。選択は保ったまま、該当サムネイルだけ描き直す。"""
+        if self._page_list is None or not mapping:
+            return
+        self._page_list.set_crops(mapping)
+        for r in mapping:
             idx = self.index(r)
             self.dataChanged.emit(idx, idx)
         self._after_change()
@@ -297,6 +308,24 @@ class ThumbnailView(QListView):
         self.selectionModel().selectionChanged.connect(lambda *_: self.selection_changed.emit(self.selected_rows()))
         model.modelReset.connect(lambda: self.selection_changed.emit([]))
 
+    # -- ホイールスクロール ------------------------------------------------------
+    # IconMode + ScrollPerPixel だと Qt 既定の1ノッチが「サムネイル1行ぶん×3」前後になり、
+    # 大きく飛びすぎる。1ノッチ=サムネイル高さの約 1/4 に固定する。
+    WHEEL_ROW_FRACTION = 0.25
+
+    def wheelEvent(self, event) -> None:
+        bar = self.verticalScrollBar()
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            event.ignore()
+            return
+        pixel = event.pixelDelta().y()
+        if pixel:                                   # タッチパッド等の精密スクロールはそのまま
+            bar.setValue(bar.value() - pixel)
+        else:
+            step = max(24, int(self.gridSize().height() * self.WHEEL_ROW_FRACTION))
+            bar.setValue(bar.value() - round(event.angleDelta().y() / 120 * step))
+        event.accept()
+
     # -- サイズ -----------------------------------------------------------------
     def _apply_size(self) -> None:
         w = self._model.thumbnail_width()
@@ -337,10 +366,11 @@ class ThumbnailView(QListView):
 
     @staticmethod
     def _pdf_paths(mime) -> list[Path]:
+        """ドロップされたファイルのうち、PDF と画像（JPG/PNG…）だけ。"""
         if mime is None or not mime.hasUrls():
             return []
         paths = [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile()]
-        return [p for p in paths if p.suffix.lower() == ".pdf"]
+        return [p for p in paths if p.suffix.lower() == ".pdf" or is_image(p)]
 
     def _drop_target(self, pos: QPoint) -> tuple[int, QLine | None]:
         """ドロップ位置 → (挿入位置 to, 表示する縦線)。to は「元リストの to 番目の直前」。"""

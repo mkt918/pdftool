@@ -376,3 +376,57 @@ def test_internal_drag_reorders_pages(win: MainWindow, tmp_path: Path):
     win.view._internal_drag = False
     assert [r.source_index for r in win.page_list.pages] == [1, 2, 3, 0]
     assert win.view.selected_rows() == [3]
+
+
+def test_wheel_scroll_moves_a_fraction_of_a_row(win: MainWindow, tmp_path: Path):
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    win.open_pdf(make_image_pdf(tmp_path / "w.pdf", pages=40))
+    win.resize(900, 500)
+    win.show()
+    QApplication.processEvents()
+    bar = win.view.verticalScrollBar()
+    assert bar.maximum() > 0
+    row_h = win.view.gridSize().height()
+    bar.setValue(0)
+    ev = QWheelEvent(QPointF(100, 100), QPointF(100, 100), QPoint(0, 0), QPoint(0, -120),
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                     Qt.ScrollPhase.NoScrollPhase, False)
+    win.view.wheelEvent(ev)
+    moved = bar.value()
+    assert 0 < moved <= row_h * 0.5          # 1ノッチで1行ぶん以上は飛ばない
+
+
+def test_dropping_images_converts_and_inserts(win: MainWindow, tmp_path: Path):
+    from PIL import Image
+    from PySide6.QtCore import QPoint
+
+    a = make_image_pdf(tmp_path / "a.pdf", pages=2)
+    img = tmp_path / "写真.jpg"
+    Image.new("RGB", (1200, 900), (10, 120, 200)).save(img)
+    win.open_pdf(a)
+    win.show()
+    QApplication.processEvents()
+    last = win.view.visualRect(win.view.model().index(1))
+    _url_drop(win.view, [img], QPoint(last.right() + 1, last.center().y()))
+    assert wait_until(lambda: len(win.page_list) == 3)
+    assert win.page_list[2].source_path.name == "写真.pdf"          # 一時PDFに変換されたページ
+    assert win.view.selected_rows() == [2]
+    # 保存先・ファイル名は元の画像を基準にする（一時フォルダに出さない）
+    from pdftool.utils import naming
+    assert naming.output_file(win.page_list[2].source_path, "x", ".pdf").parent == tmp_path
+
+
+def test_dropping_only_images_without_document_opens_them(win: MainWindow, tmp_path: Path):
+    from PIL import Image
+    from PySide6.QtCore import QPoint
+
+    imgs = []
+    for i, c in enumerate(((255, 0, 0), (0, 255, 0))):
+        p = tmp_path / f"p{i}.png"
+        Image.new("RGB", (400, 600), c).save(p)
+        imgs.append(p)
+    _url_drop(win.view, imgs, QPoint(10, 10))
+    assert wait_until(lambda: win.page_list is not None and len(win.page_list) == 2)
+    assert [r.source_path.name for r in win.page_list.pages] == ["p0.pdf", "p1.pdf"]

@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+from PIL import Image
 from PySide6.QtWidgets import QApplication
 
 import pdftool.core.compress as C
@@ -39,8 +40,12 @@ def pageops_panel(win: MainWindow):
     return win.panels[2]
 
 
-def batch_panel(win: MainWindow):
+def finish_panel(win: MainWindow):
     return win.panels[3]
+
+
+def batch_panel(win: MainWindow):
+    return win.panels[4]
 
 
 # ---------------------------------------------------------------------------
@@ -275,3 +280,188 @@ def test_batch_panel_run_disabled_without_gs(win: MainWindow, tmp_path: Path):
     panel.radio_compress.setChecked(True)
     assert not panel.run_btn.isEnabled()
     assert "Ghostscript" in panel.folder_status_label.text()
+
+
+# ---------------------------------------------------------------------------
+# PageOpsPanel: 白紙ページ検出・余白トリミング
+# ---------------------------------------------------------------------------
+def _scan_pdf(path: Path):
+    """白紙 / 枠だけの内容ページ / 白紙 / 内容ページ の 4 ページ。"""
+    from PIL import ImageDraw
+
+    def page(box=None):
+        im = Image.new("RGB", (800, 1000), "white")
+        if box:
+            ImageDraw.Draw(im).rectangle(box, fill="black")
+        return im
+
+    imgs = [page(), page((200, 300, 599, 699)), page(), page((100, 200, 499, 599))]
+    imgs[0].save(path, save_all=True, append_images=imgs[1:], resolution=100)
+    return path
+
+
+def test_blank_group_selects_blank_pages(win: MainWindow, tmp_path: Path):
+    panel = pageops_panel(win)
+    win.tabs.setCurrentWidget(panel)
+    win.open_pdf(_scan_pdf(tmp_path / "scan.pdf"))
+    g = panel.blank_group
+    assert g.find_btn.isEnabled() and "全 4 ページ" in g.target_label.text()
+    g.find_btn.click()
+    assert wait_until(lambda: "白紙の可能性" in g.status_label.text() or "見つかりませんでした" in g.status_label.text())
+    assert win.view.selected_rows() == [0, 2]
+    assert "2 ページ" in g.status_label.text()
+    win.act_delete.trigger()                                    # 確認して削除 → 内容ページだけ残る
+    assert len(win.page_list) == 2
+
+
+def test_blank_group_respects_selection_scope(win: MainWindow, tmp_path: Path):
+    panel = pageops_panel(win)
+    win.open_pdf(_scan_pdf(tmp_path / "scan.pdf"))
+    win.view.select_rows([2, 3])                                # 選択範囲だけを調べる
+    QApplication.processEvents()
+    g = panel.blank_group
+    assert "選択中の 2 ページ" in g.target_label.text()
+    g.find_btn.click()
+    assert wait_until(lambda: "白紙の可能性" in g.status_label.text())
+    assert win.view.selected_rows() == [2]
+
+
+def test_trim_group_auto_applies_crops_with_undo(win: MainWindow, tmp_path: Path):
+    panel = pageops_panel(win)
+    win.open_pdf(_scan_pdf(tmp_path / "scan.pdf"))
+    g = panel.trim_group
+    g.pad_spin.setValue(0)
+    g.apply_btn.click()
+    assert wait_until(lambda: "トリミングしました" in g.status_label.text())
+    crops = [r.crop for r in win.page_list.pages]
+    assert crops[0] is None and crops[2] is None                # 白紙は変更しない
+    assert crops[1] == pytest.approx((0.25, 0.30, 0.25, 0.30), abs=0.02)
+    assert win.page_list.can_undo
+    win.act_undo.trigger()
+    assert all(r.crop is None for r in win.page_list.pages)
+
+
+def test_trim_group_manual_and_reset(win: MainWindow, tmp_path: Path):
+    panel = pageops_panel(win)
+    win.open_pdf(_scan_pdf(tmp_path / "scan.pdf"))
+    win.view.select_rows([1])
+    QApplication.processEvents()
+    g = panel.trim_group
+    g.radio_manual.setChecked(True)
+    g.manual_spins["left"].setValue(20)
+    g.manual_spins["top"].setValue(10)
+    g.apply_btn.click()
+    assert wait_until(lambda: "トリミングしました" in g.status_label.text())
+    assert win.page_list[1].crop is not None and win.page_list[0].crop is None
+    l, t, r, b = win.page_list[1].crop
+    assert l == pytest.approx(20 * 72 / 25.4 / 576, abs=0.002) and t > 0 and r == 0 and b == 0
+    g.reset_btn.click()
+    assert win.page_list[1].crop is None
+
+
+def test_trim_group_ignores_result_if_pages_changed(win: MainWindow, tmp_path: Path):
+    panel = pageops_panel(win)
+    win.open_pdf(_scan_pdf(tmp_path / "scan.pdf"))
+    g = panel.trim_group
+    g.apply_btn.click()
+    win.model.remove_pages([0])                                 # 調べている間に構成を変える
+    assert wait_until(lambda: g._worker is None)
+    assert "構成が変わった" in g.status_label.text()
+    assert all(r.crop is None for r in win.page_list.pages)
+
+
+# ---------------------------------------------------------------------------
+# FinishPanel（仕上げ）
+# ---------------------------------------------------------------------------
+def test_finish_panel_requires_a_choice(win: MainWindow, tmp_path: Path, monkeypatch):
+    panel = finish_panel(win)
+    errors = []
+    monkeypatch.setattr(win, "show_error", lambda msg, title="エラー": errors.append(msg))
+    win.open_pdf(make_image_pdf(tmp_path / "f.pdf", pages=2))
+    panel.run_btn.click()
+    assert errors and "チェックを入れてください" in errors[0]
+    panel.wm_box.setChecked(True)
+    panel.wm_text.setText("  ")
+    panel.run_btn.click()
+    assert "透かしの文字が空です" in errors[-1]
+
+
+def test_finish_panel_page_numbers_saved_next_to_source(win: MainWindow, tmp_path: Path):
+    from pdftool.core.document import PdfDocument
+
+    panel = finish_panel(win)
+    win.tabs.setCurrentWidget(panel)
+    win.open_pdf(make_image_pdf(tmp_path / "資料.pdf", pages=3))
+    win.model.remove_pages([0])                                   # 編集後の状態（2ページ）が出力される
+    panel.num_box.setChecked(True)
+    panel.run_btn.click()
+    assert wait_until(lambda: "保存しました" in panel.status_label.text())
+    out = panel._last_output
+    assert out.parent == tmp_path and out.name.endswith("_資料_stamped.pdf")
+    with PdfDocument(out) as d:
+        assert d.page_count == 2
+        img = d.render_page(0, dpi=72)
+    # 下中央に番号（暗い画素）が入っている。元画像はグラデーションなので、背景との差で見るため再描画差分で確認
+    with PdfDocument(tmp_path / "資料.pdf") as d0:
+        base = d0.render_page(1, dpi=72)
+    from PIL import ImageChops
+    diff = ImageChops.difference(img.convert("RGB"), base.convert("RGB")).getbbox()
+    assert diff is not None and diff[1] > img.height * 0.85
+    assert panel.open_folder_btn.isVisible()
+
+
+def test_finish_panel_impose_2in1(win: MainWindow, tmp_path: Path):
+    from pypdf import PdfReader
+
+    panel = finish_panel(win)
+    win.open_pdf(make_image_pdf(tmp_path / "ni.pdf", pages=4))
+    panel.im_box.setChecked(True)
+    panel.im_layout.setCurrentIndex(0)
+    panel.run_btn.click()
+    assert wait_until(lambda: "保存しました" in panel.status_label.text())
+    out = panel._last_output
+    assert out.name.endswith("_ni_2in1.pdf")
+    pdf = PdfReader(str(out))
+    assert len(pdf.pages) == 2
+    assert float(pdf.pages[0].mediabox.width) > float(pdf.pages[0].mediabox.height)    # 横向き
+
+
+def test_finish_panel_applies_crop_and_rotation_from_editing(win: MainWindow, tmp_path: Path):
+    from pdftool.core.document import PdfDocument
+
+    panel = finish_panel(win)
+    win.open_pdf(make_image_pdf(tmp_path / "cr.pdf", pages=1))
+    win.model.set_crops({0: (0.0, 0.0, 0.5, 0.0)})                 # 右半分を切る → 144x384
+    win.model.rotate_pages([0], 90)                                # 回転 → 384x144
+    panel.lb_box.setChecked(True)
+    panel.run_btn.click()
+    assert wait_until(lambda: "保存しました" in panel.status_label.text())
+    with PdfDocument(panel._last_output) as d:
+        info = d.page_info(0)
+    assert (info.width_pt, info.height_pt) == pytest.approx((384, 144), abs=0.6)
+
+
+def test_finish_panel_preview_opens_dialog(win: MainWindow, tmp_path: Path):
+    from pdftool.ui.preview_dialog import PagePreviewDialog
+
+    panel = finish_panel(win)
+    win.open_pdf(make_image_pdf(tmp_path / "pv.pdf", pages=3))
+    panel.lb_box.setChecked(True)
+    panel.preview_btn.click()
+    assert wait_until(lambda: win.findChildren(PagePreviewDialog))
+    assert not list(tmp_path.glob("*stamped*"))                     # プレビューではファイルを作らない
+
+
+def test_finish_panel_output_for_image_goes_next_to_original(win: MainWindow, tmp_path: Path):
+    from PIL import Image
+    from PySide6.QtCore import QPoint
+
+    img = tmp_path / "スキャン.png"
+    Image.new("RGB", (600, 800), (240, 240, 200)).save(img)
+    win.open_files([img])
+    assert wait_until(lambda: win.page_list is not None and len(win.page_list) == 1)
+    panel = finish_panel(win)
+    panel.num_box.setChecked(True)
+    panel.run_btn.click()
+    assert wait_until(lambda: "保存しました" in panel.status_label.text())
+    assert panel._last_output.parent == tmp_path and "スキャン_stamped" in panel._last_output.name

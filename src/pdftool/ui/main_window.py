@@ -39,11 +39,14 @@ from PySide6.QtWidgets import (
 
 from pdftool.core.compress import format_size
 from pdftool.core.document import PdfDocument, PdfEncryptedError, PdfError
+from pdftool.core.images import convert_images, is_image
 from pdftool.core.pageops import PageList
 from pdftool.ui.panels.base import PanelBase
+from pdftool.ui.preview_dialog import PagePreviewDialog
 from pdftool.ui.panels.batch_panel import BatchPanel
 from pdftool.ui.panels.compress_panel import CompressPanel
 from pdftool.ui.panels.export_panel import ExportPanel
+from pdftool.ui.panels.finish_panel import FinishPanel
 from pdftool.ui.panels.pageops_panel import PageOpsPanel
 from pdftool.ui.thumbnail_view import THUMB_SIZES, ThumbnailModel, ThumbnailView
 from pdftool.utils.gs_locator import find_ghostscript, ghostscript_version
@@ -84,7 +87,7 @@ class MainWindow(QMainWindow):
         # --- 機能タブ ---
         self.tabs = QTabWidget()
         self.panels: list[PanelBase] = []
-        for panel_cls in (ExportPanel, CompressPanel, PageOpsPanel, BatchPanel):
+        for panel_cls in (ExportPanel, CompressPanel, PageOpsPanel, FinishPanel, BatchPanel):
             self._add_panel(panel_cls(self))
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -299,29 +302,50 @@ class MainWindow(QMainWindow):
         return total
 
     def _on_files_dropped(self, paths: list, at: int, replace: bool) -> None:
-        """PDF ファイルのドロップ。文書を開いていれば結合、Shift 押下か未オープンなら開く。"""
+        """PDF・画像ファイルのドロップ/選択。文書を開いていれば結合、Shift 押下か未オープンなら開く。
+
+        画像（JPG/PNG…）は一時 PDF に変換してから同じ流れに乗せる。変換は時間がかかりうるので別スレッド。
+        """
         paths = [Path(p) for p in paths]
+        if not paths:
+            return
+        if not any(is_image(p) for p in paths):
+            self._merge_files(paths, at, replace)
+            return
+        self.statusBar().showMessage("画像を変換しています…")
+        self.run_worker(
+            convert_images, paths,
+            on_finished=lambda converted: self._merge_files(converted, at, replace),
+        )
+
+    def _merge_files(self, paths: list[Path], at: int, replace: bool) -> None:
         if self.page_list is None or len(self.page_list) == 0 or replace:
             if self.open_pdf(paths[0]) and len(paths) > 1:
                 self.insert_pdfs(paths[1:], len(self.page_list))
         else:
             self.insert_pdfs(paths, at)
 
+    def open_files(self, paths: list) -> None:
+        """起動引数など: 先頭を開き、残りを末尾に結合する（PDF・画像どちらも可）。"""
+        self._on_files_dropped(paths, 0, True)
+
+    _FILE_FILTER = "PDF・画像 (*.pdf *.jpg *.jpeg *.png *.bmp *.gif *.tif *.tiff *.webp);;PDF (*.pdf);;画像 (*.jpg *.jpeg *.png *.bmp *.gif *.tif *.tiff *.webp)"
+
     def open_dialog(self) -> None:
         start = self.settings.value("last_dir", "")
-        f, _ = QFileDialog.getOpenFileName(self, "PDF を開く", start, "PDF (*.pdf)")
-        if f:
-            self.settings.setValue("last_dir", str(Path(f).parent))
-            self.open_pdf(f)
+        files, _ = QFileDialog.getOpenFileNames(self, "PDF・画像を開く", start, self._FILE_FILTER)
+        if files:
+            self.settings.setValue("last_dir", str(Path(files[0]).parent))
+            self.open_files(files)         # 複数選ぶと 1 つ目を開き、残りを末尾に結合
 
     def append_dialog(self) -> None:
         start = self.settings.value("last_dir", "")
-        files, _ = QFileDialog.getOpenFileNames(self, "結合する PDF を選ぶ", start, "PDF (*.pdf)")
-        if files:
-            self.settings.setValue("last_dir", str(Path(files[0]).parent))
-        for f in files:
-            if not self.append_pdf(f):
-                break
+        files, _ = QFileDialog.getOpenFileNames(self, "結合する PDF・画像を選ぶ", start, self._FILE_FILTER)
+        if not files:
+            return
+        self.settings.setValue("last_dir", str(Path(files[0]).parent))
+        n = len(self.page_list) if self.page_list is not None else 0
+        self._on_files_dropped(files, n, False)
 
     def save_dialog(self) -> None:
         pl = self.page_list
@@ -429,12 +453,16 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # D&D / 終了
     # ------------------------------------------------------------------
+    @staticmethod
+    def _is_droppable(local_file: str) -> bool:
+        return local_file.lower().endswith(".pdf") or is_image(local_file)
+
     def dragEnterEvent(self, e: QDragEnterEvent) -> None:
-        if any(u.toLocalFile().lower().endswith(".pdf") for u in e.mimeData().urls()):
+        if any(self._is_droppable(u.toLocalFile()) for u in e.mimeData().urls()):
             e.acceptProposedAction()
 
     def dropEvent(self, e: QDropEvent) -> None:
-        paths = [Path(u.toLocalFile()) for u in e.mimeData().urls() if u.toLocalFile().lower().endswith(".pdf")]
+        paths = [Path(u.toLocalFile()) for u in e.mimeData().urls() if self._is_droppable(u.toLocalFile())]
         if not paths:
             return
         # サムネイル以外（余白・タブ等）へのドロップは末尾に結合。未オープンなら開く。
@@ -462,22 +490,3 @@ class MainWindow(QMainWindow):
         self.thumb_worker.stop()
         QThreadPool.globalInstance().waitForDone(5000)
         super().closeEvent(e)
-
-
-class PagePreviewDialog(QDialog):
-    """1 ページの拡大表示（スクロールのみ。ズームは作らない）。"""
-
-    def __init__(self, image: QImage, title: str, parent: QWidget | None = None):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        lbl = QLabel()
-        lbl.setPixmap(QPixmap.fromImage(image))
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        area = QScrollArea()
-        area.setWidget(lbl)
-        area.setWidgetResizable(True)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(area)
-        self.resize(min(image.width() + 40, 1000), min(image.height() + 40, 900))

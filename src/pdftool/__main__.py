@@ -43,16 +43,16 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     from PySide6.QtWidgets import QApplication
 
+    from pdftool.core.images import is_image
     from pdftool.ui.main_window import MainWindow
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("pdftool")
     win = MainWindow()
     win.show()
-    pdfs = [Path(a) for a in argv if a.lower().endswith(".pdf")]
-    if pdfs and win.open_pdf(pdfs[0]):
-        for p in pdfs[1:]:
-            win.append_pdf(p)
+    files = [Path(a) for a in argv if a.lower().endswith(".pdf") or is_image(a)]
+    if files:
+        win.open_files(files)
     return app.exec()
 
 

@@ -119,6 +119,7 @@ class ThumbRequest:
     source_index: int
     rotation: int
     width: int
+    crop: tuple | None = None
 
 
 class ThumbnailWorker(QThread):
@@ -199,7 +200,7 @@ class ThumbnailWorker(QThread):
                 self._queued.discard(req.key)
             try:
                 img = self._get_doc(req.source_path).render_thumbnail(
-                    req.source_index, width=req.width, rotation=req.rotation
+                    req.source_index, width=req.width, rotation=req.rotation, crop=req.crop
                 )
                 self.ready.emit(req.key, pil_to_qimage(img))
             except PdfError as e:

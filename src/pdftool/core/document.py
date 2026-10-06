@@ -57,6 +57,43 @@ class PdfEmptyError(PdfError):
 
 
 # ---------------------------------------------------------------------------
+# トリミング（ページ余白）
+# ---------------------------------------------------------------------------
+# (左, 上, 右, 下) の余白。ページの幅/高さに対する割合 0..1。
+# 「PDF 内の /Rotate を適用した、ユーザー回転(ref.rotation)前の見た目」を基準にする。
+Crop = tuple[float, float, float, float]
+
+
+def validate_crop(crop: Crop | None) -> Crop | None:
+    """正規化して返す。余白が全部 0 なら None。不正値は ValueError。"""
+    if crop is None:
+        return None
+    l, t, r, b = (float(x) for x in crop)
+    if min(l, t, r, b) < 0:
+        raise ValueError("トリミングの余白は 0 以上で指定してください")
+    if l + r >= 0.98 or t + b >= 0.98:
+        raise ValueError("トリミングしすぎです（ページがほとんど残りません）")
+    if max(l, t, r, b) < 1e-6:
+        return None
+    return (l, t, r, b)
+
+
+def rotate_crop(crop: Crop, rotation: int) -> Crop:
+    """crop を、時計回りに rotation 度(0/90/180/270)回したページ上の余白に直す。"""
+    l, t, r, b = crop
+    rot = rotation % 360
+    if rot == 0:
+        return crop
+    if rot == 90:      # 上辺→右、左辺→上、下辺→左、右辺→下
+        return (b, l, t, r)
+    if rot == 180:
+        return (r, b, l, t)
+    if rot == 270:
+        return (t, r, b, l)
+    raise ValueError("rotation は 90 度単位で指定してください")
+
+
+# ---------------------------------------------------------------------------
 # データ型
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -169,32 +206,50 @@ class PdfDocument:
         return img.copy()
 
     def render_page(
-        self, index: int, *, dpi: float = 150.0, rotation: int = 0
+        self, index: int, *, dpi: float = 150.0, rotation: int = 0, crop: Crop | None = None
     ) -> Image.Image:
         """ページを指定 dpi でレンダリングする。
 
         rotation: 追加で回す角度（0/90/180/270）。PDF 内の /Rotate は自動適用済み。
+        crop: トリミング余白（`Crop`）。回転前のページ基準で、描画後に切り取る。
         戻り値は RGB の PIL Image。
         """
         self._check_index(index)
         if dpi <= 0:
             raise ValueError("dpi は正の値を指定してください")
-        return self._render(index, scale=dpi / 72.0, rotation=rotation)
+        img = self._render(index, scale=dpi / 72.0, rotation=rotation)
+        return _apply_crop(img, crop, rotation)
 
     def render_thumbnail(
-        self, index: int, *, width: int = 180, rotation: int = 0
+        self, index: int, *, width: int = 180, rotation: int = 0, crop: Crop | None = None
     ) -> Image.Image:
         """横幅 width px に収まるサムネイルをレンダリングする（縦長ページなら高さが超えることもある）。
 
-        正確には「回転後の横幅が width になる」スケールで描画する。
+        正確には「回転・トリミング後の横幅が width になる」スケールで描画する。
         """
         self._check_index(index)
         if width <= 0:
             raise ValueError("width は正の値を指定してください")
         info = self.page_info(index)
         base_w = info.height_pt if (rotation % 180) == 90 else info.width_pt
-        scale = width / base_w if base_w > 0 else 1.0
-        return self._render(index, scale=scale, rotation=rotation)
+        kept = 1.0
+        crop = validate_crop(crop)
+        if crop:
+            l, _t, r, _b = rotate_crop(crop, rotation)
+            kept = max(0.05, 1.0 - l - r)
+        scale = width / (base_w * kept) if base_w > 0 else 1.0
+        img = self._render(index, scale=scale, rotation=rotation)
+        return _apply_crop(img, crop, rotation)
+
+
+def _apply_crop(img: Image.Image, crop: Crop | None, rotation: int) -> Image.Image:
+    crop = validate_crop(crop)
+    if crop is None:
+        return img
+    l, t, r, b = rotate_crop(crop, rotation)
+    w, h = img.size
+    box = (round(l * w), round(t * h), w - round(r * w), h - round(b * h))
+    return img.crop(box)
 
 
 def open_document(path: Path | str, password: str | None = None) -> PdfDocument:

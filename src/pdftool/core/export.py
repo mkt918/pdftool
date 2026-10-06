@@ -152,7 +152,7 @@ def export_refs(
             if doc is None:
                 doc = PdfDocument(ref.source_path, password=passwords.get(ref.source_path))
                 docs[ref.source_path] = doc
-            img = doc.render_page(ref.source_index, dpi=options.dpi, rotation=ref.rotation)
+            img = doc.render_page(ref.source_index, dpi=options.dpi, rotation=ref.rotation, crop=ref.crop)
             dest = folder / naming.numbered_name(base, i, options.ext)
             _save_image(img, dest, options)
             files.append(dest)

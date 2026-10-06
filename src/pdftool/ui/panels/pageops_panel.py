@@ -1,10 +1,13 @@
 """ページ操作パネル。
 
 削除・回転・並べ替え・保存はツールバー / サムネイル上のドラッグ操作で行う。
-このパネルが担当するのは、ツールバーではやりにくい3つの操作:
+このパネルが担当するのは、ツールバーではやりにくい操作:
   - 範囲文字列（'1-5,8,10-12'）によるページ選択
   - 任意位置への PDF 挿入（末尾への結合はツールバーの「結合…」で足りる）
   - 分割（選択ページ / 全ページを別ファイルへ書き出す）
+  - 白紙ページの検出（見つけて選択するだけ。削除は確認してから）
+  - 余白トリミング（自動 / 手動 mm）
+項目が多いのでスクロールできるようにしてある。
 """
 
 from __future__ import annotations
@@ -20,12 +23,15 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
+    QWidget,
 )
 
 from pdftool.core.document import PdfEncryptedError, PdfError
 from pdftool.core.pageops import parse_page_spec
 from pdftool.ui.panels.base import PanelBase
+from pdftool.ui.panels.cleanup_groups import BlankPageGroup, TrimGroup
 
 if TYPE_CHECKING:
     from pdftool.ui.main_window import MainWindow
@@ -38,7 +44,15 @@ class PageOpsPanel(PanelBase):
         super().__init__(window, parent)
         self._split_running = False
 
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        outer.addWidget(scroll)
+        body = QWidget()
+        scroll.setWidget(body)
+        lay = QVBoxLayout(body)
 
         select_box = QGroupBox("範囲指定で選択")
         select_lay = QHBoxLayout(select_box)
@@ -73,15 +87,24 @@ class PageOpsPanel(PanelBase):
         self.status_label.setWordWrap(True)
         lay.addWidget(self.status_label)
 
+        self.blank_group = BlankPageGroup(window)
+        lay.addWidget(self.blank_group)
+        self.trim_group = TrimGroup(window)
+        lay.addWidget(self.trim_group)
+
         lay.addStretch(1)
         self._update_enabled()
 
     # -- 状態管理 -------------------------------------------------------
     def on_document_changed(self) -> None:
         self._update_enabled()
+        self.blank_group.refresh()
+        self.trim_group.refresh()
 
     def on_selection_changed(self, rows: list[int]) -> None:
         self._update_enabled()
+        self.blank_group.refresh()
+        self.trim_group.refresh()
 
     def _update_enabled(self) -> None:
         pl = self.window_.page_list

@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+from pdftool.utils.tempfiles import origin_of
+
 
 def date_prefix(today: date | None = None) -> str:
     """'26-09-12' 形式の日付プレフィックス。"""
@@ -47,6 +49,7 @@ def output_file(
         ext:     拡張子（'.pdf'）。None なら元と同じ
         out_dir: 出力先フォルダ。None なら元と同じフォルダ
     """
+    source = origin_of(source)   # 画像から作った一時PDFなら元の画像を基準にする
     ext = ext if ext is not None else source.suffix
     if ext and not ext.startswith("."):
         ext = "." + ext
@@ -66,6 +69,7 @@ def output_dir(
     フォルダは作成しない（呼び出し側で mkdir する）。
     既存なら `_2`, `_3`... を付ける。
     """
+    source = origin_of(source)
     parent = out_dir if out_dir is not None else source.parent
     return unique_path(parent / f"{date_prefix(today)}_{source.stem}_{suffix}")
 
@@ -74,4 +78,4 @@ def numbered_name(source: Path, index: int, ext: str, width: int = 3) -> str:
     """連番ファイル名: `元名_p001.png`（index は1始まりのページ番号）。"""
     if not ext.startswith("."):
         ext = "." + ext
-    return f"{source.stem}_p{index:0{width}d}{ext}"
+    return f"{origin_of(source).stem}_p{index:0{width}d}{ext}"

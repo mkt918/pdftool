@@ -17,16 +17,20 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import RectangleObject
 
 from pdftool.core.document import (
+    Crop,
     PdfBrokenError,
     PdfDocument,
     PdfEncryptedError,
     PdfError,
+    validate_crop,
 )
+from pdftool.core.stamp import StampPainter, TextStamp
 from pdftool.utils import naming
 
 UNDO_LIMIT = 100
@@ -40,11 +44,13 @@ class PageRef:
     source_path: Path   # 元 PDF（結合時は複数ファイルが混在しうる）
     source_index: int   # 元 PDF 内でのページ番号（0 始まり）
     rotation: int = 0   # 追加の累積回転 0/90/180/270（元の /Rotate には含まれない）
+    crop: Crop | None = None  # トリミング余白 (左,上,右,下)=ページ幅/高さ比。回転前の見た目が基準
 
     def __post_init__(self):
         if self.rotation % 90 != 0:
             raise ValueError("rotation は 90 度単位")
         object.__setattr__(self, "rotation", self.rotation % 360)
+        object.__setattr__(self, "crop", validate_crop(self.crop))
 
     def rotated(self, delta: int) -> "PageRef":
         return replace(self, rotation=(self.rotation + delta) % 360)
@@ -239,6 +245,17 @@ class PageList:
         insert_at = to - sum(1 for i in idx if i < to)
         self._commit(rest[:insert_at] + moving + rest[insert_at:])
 
+    def set_crops(self, mapping: dict[int, Crop | None]) -> None:
+        """ページごとにトリミング余白を設定する（None で解除）。1 回の Undo で戻せる。"""
+        n = len(self._pages)
+        for i in mapping:
+            if not 0 <= i < n:
+                raise IndexError(f"ページ番号が範囲外です: {i} (0..{n - 1})")
+        self._commit(
+            replace(r, crop=validate_crop(mapping[i])) if i in mapping else r
+            for i, r in enumerate(self._pages)
+        )
+
     def reorder(self, new_order: Sequence[int]) -> None:
         """new_order[k] = 新しい k 番目に来る旧インデックス（完全な順列であること）。"""
         n = len(self._pages)
@@ -253,12 +270,19 @@ class PageList:
             raise ValueError("ページがありません")
         return naming.output_file(self._pages[0].source_path, suffix, ".pdf")
 
-    def save(self, dest: Path | str | None = None) -> Path:
+    def save(
+        self,
+        dest: Path | str | None = None,
+        *,
+        stamps: Sequence[TextStamp] | None = None,
+        progress: Callable[[WriteProgress], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
+    ) -> Path:
         """現在の状態を新規ファイルに書き出す。実際に書いたパスを返す。"""
         if not self._pages:
             raise ValueError("ページがありません")
         dest = Path(dest) if dest is not None else self.default_output_path()
-        out = write_pages(self._pages, dest, self._passwords)
+        out = write_pages(self._pages, dest, self._passwords, stamps=stamps, progress=progress, cancel=cancel)
         self._saved_state = self._pages
         return out
 
@@ -299,30 +323,57 @@ def _open_reader(path: Path, passwords: dict[Path, str]) -> PdfReader:
     return reader
 
 
-def write_pages(
+def apply_crop_to_page(page, crop: Crop) -> None:
+    """/Rotate を焼き込み済み(回転0)のページに、(左,上,右,下) の余白割合でトリミングを掛ける。"""
+    l, t, r, b = crop
+    box = page.cropbox
+    w, h = float(box.width), float(box.height)
+    new = RectangleObject((
+        float(box.left) + l * w, float(box.bottom) + b * h,
+        float(box.right) - r * w, float(box.top) - t * h,
+    ))
+    page.mediabox = new
+    page.cropbox = new
+    for name in ("trimbox", "bleedbox", "artbox"):
+        setattr(page, name, new)
+
+
+class WriteCancelled(Exception):
+    """cancel コールバックにより中断された（Worker は "...Cancelled" を中断として扱う）。"""
+
+
+@dataclass(frozen=True)
+class WriteProgress:
+    current: int    # 1 始まり
+    total: int
+    message: str
+
+
+def prepare_pages(
     pages: Sequence[PageRef],
-    dest: Path | str,
+    writer: PdfWriter,
     passwords: dict[Path, str] | None = None,
-) -> Path:
-    """PageRef の列を 1 つの PDF として書き出す。
+    *,
+    upright: bool = False,
+    stamps: Sequence[TextStamp] | None = None,
+    progress: Callable[[WriteProgress], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> Iterator:
+    """PageRef を順に writer へ追加し、回転・トリミング・スタンプを反映したページを 1 枚ずつ yield する。
 
-    - 元ファイルと同じパスへの書き出しは拒否（原本を上書きしない）
-    - dest が既に存在すれば `_2`, `_3` … を付けた別名にする
-    - 戻り値は実際に書いたパス
+    upright=True なら /Rotate を内容へ焼き込み、見た目どおり回転 0 のページにして返す
+    （面付けなど、ページを別の用紙へ配置する用途）。トリミング・スタンプを使うときも焼き込む
+    （しおり・リンク注釈の位置は回転ページで正しくなくなりうる）。
+    どちらも使わない通常保存では、従来通り /Rotate の加算だけで元ページの構造を壊さない。
     """
-    if not pages:
-        raise ValueError("書き出すページがありません")
     passwords = passwords or {}
-    dest = Path(dest)
-    sources = {r.source_path.resolve() for r in pages}
-    if dest.resolve() in sources:
-        raise PdfError("元ファイルと同じ名前には保存できません（原本は上書きしません）", dest)
-    dest = naming.unique_path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-
+    painter = StampPainter(writer) if stamps else None
+    bake = upright or bool(stamps)
     readers: dict[Path, PdfReader] = {}
-    writer = PdfWriter()
-    for ref in pages:
+    total = len(pages)
+    for i, ref in enumerate(pages):
+        if cancel is not None and cancel():
+            raise WriteCancelled()
         reader = readers.get(ref.source_path)
         if reader is None:
             reader = readers[ref.source_path] = _open_reader(ref.source_path, passwords)
@@ -331,9 +382,23 @@ def write_pages(
                 f"{ref.source_path.name} にページ {ref.source_index + 1} がありません", ref.source_path
             )
         added = writer.add_page(reader.pages[ref.source_index])
+        if ref.crop or bake:
+            # /Rotate を内容に焼き込んでから、見た目基準の余白で切る（ref.rotation はその後）
+            added.transfer_rotation_to_content()
+        if ref.crop:
+            apply_crop_to_page(added, ref.crop)
         if ref.rotation:
             added.rotate(ref.rotation)
+            if bake:
+                added.transfer_rotation_to_content()
+        if painter is not None:
+            painter.stamp_page(added, list(stamps), i, total)
+        if progress:
+            progress(WriteProgress(i + 1, total, f"ページを処理しています… {i + 1}/{total}"))
+        yield added
 
+
+def _atomic_write(writer: PdfWriter, dest: Path) -> None:
     tmp = dest.with_name(dest.name + ".part")
     try:
         with open(tmp, "wb") as f:
@@ -342,6 +407,42 @@ def write_pages(
     finally:
         if tmp.exists():
             tmp.unlink()
+
+
+def check_dest(pages: Sequence[PageRef], dest: Path | str) -> Path:
+    """出力先の検証: 元ファイルの上書きを拒否し、既存なら _2, _3 … を付けて、フォルダを作る。"""
+    dest = Path(dest)
+    sources = {r.source_path.resolve() for r in pages}
+    if dest.resolve() in sources:
+        raise PdfError("元ファイルと同じ名前には保存できません（原本は上書きしません）", dest)
+    dest = naming.unique_path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def write_pages(
+    pages: Sequence[PageRef],
+    dest: Path | str,
+    passwords: dict[Path, str] | None = None,
+    *,
+    stamps: Sequence[TextStamp] | None = None,
+    progress: Callable[[WriteProgress], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> Path:
+    """PageRef の列を 1 つの PDF として書き出す。
+
+    - 元ファイルと同じパスへの書き出しは拒否（原本を上書きしない）
+    - dest が既に存在すれば `_2`, `_3` … を付けた別名にする
+    - stamps を渡すと、ページ番号・透かし・ラベルを重ねる（core/stamp.py）
+    - 戻り値は実際に書いたパス
+    """
+    if not pages:
+        raise ValueError("書き出すページがありません")
+    dest = check_dest(pages, dest)
+    writer = PdfWriter()
+    for _ in prepare_pages(pages, writer, passwords, stamps=stamps, progress=progress, cancel=cancel):
+        pass
+    _atomic_write(writer, dest)
     return dest
 
 

@@ -482,3 +482,106 @@ NativeFormat 固定で、テストで `setDefaultFormat(IniFormat)` を当てて
 - テスト: 実マウスによる QDrag は offscreen では即キャンセルされるため再現できない。
   `QDropEvent` を合成してハンドラを直接呼ぶ（`QMimeData` は所有されないので参照を保持すること。
   手放すと pytest の repr 時にクラッシュする）
+
+
+---
+
+## 追加機能（2026-10-06）: 画像取り込み・トリミング・白紙検出・スタンプ・面付け
+
+すべて `core/` に GUI 非依存で実装（PySide6 を import しない）。
+
+### core/document.py（追記）
+
+```python
+Crop = tuple[float, float, float, float]         # (左, 上, 右, 下) の余白。ページ幅/高さに対する割合 0..1
+def validate_crop(crop: Crop | None) -> Crop | None    # 全部0→None、負数/残らない→ValueError
+def rotate_crop(crop: Crop, rotation: int) -> Crop      # 時計回り rotation 度に回した見た目での余白へ換算
+
+PdfDocument.render_page(index, *, dpi=150.0, rotation=0, crop=None)
+PdfDocument.render_thumbnail(index, *, width=180, rotation=0, crop=None)   # width はトリミング後の横幅
+```
+
+トリミングの基準は「PDF 内 /Rotate を適用した、ユーザー回転(ref.rotation)前の見た目」。
+保存時は `transfer_rotation_to_content()` で /Rotate を内容へ焼き込んでから mediabox/cropbox を縮め、その後に
+ref.rotation を掛ける（`pageops.apply_crop_to_page`）。
+
+### core/pageops.py（追記）
+
+- `PageRef.crop: Crop | None = None`（frozen。`__post_init__` で `validate_crop`）
+- `PageList.set_crops(mapping: dict[int, Crop | None])` — 1 回の Undo で戻せる。変化が無ければ積まない
+- `prepare_pages(pages, writer, passwords=None, *, upright=False, stamps=None, progress=None, cancel=None) -> Iterator[PageObject]`
+  回転・トリミング・スタンプを反映したページを writer へ追加して yield。`upright`/`stamps` のときは /Rotate を
+  焼き込んで回転 0 にする（面付け・スタンプ用）。それ以外は従来通り /Rotate の加算だけ
+- `write_pages(pages, dest, passwords=None, *, stamps=None, progress=None, cancel=None)`、
+  `PageList.save(dest=None, *, stamps=None, progress=None, cancel=None)`
+- `WriteProgress(current, total, message)` / `WriteCancelled`（名前が Cancelled で終わる→Worker が中断扱い）
+- `check_dest(pages, dest)`（元ファイルの上書き拒否＋連番＋mkdir）、`_atomic_write(writer, dest)`
+
+### core/images.py
+
+```python
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp")
+def is_image(path) -> bool
+def image_to_pdf(src, dest_dir=None) -> Path       # 1画像=1ページ(複数フレームTIFF等は全フレーム)。長辺=A4長辺(842pt)
+def convert_images(paths) -> list[Path]             # PDF はそのまま、画像は一時PDFに。順序保持（ワーカーで呼ぶ）
+```
+
+EXIF の向きを反映、アルファは白背景に合成。変換結果は `utils/tempfiles` に「一時PDF→元の画像」を登録し、
+`utils/naming`（output_file / output_dir / numbered_name）が `origin_of()` を通すので、
+**保存・書き出しの名前と場所は元の画像が基準**になる。一時フォルダはプロセス終了時(atexit)に削除。
+
+### core/trim.py / core/blank.py
+
+```python
+class ScanCancelled(Exception); ScanProgress(current, total, message)
+content_margins(doc, index, *, pad_mm=5.0, dpi=50.0, edge=0.015) -> Crop | None    # 白紙は None
+auto_crops(refs, indices, *, pad_mm=5.0, unify=False, passwords=None, progress=None, cancel=None) -> dict[int, Crop|None]
+manual_crops(refs, indices, *, left_mm=0, top_mm=0, right_mm=0, bottom_mm=0, passwords=None) -> dict[int, Crop|None]
+
+SENSITIVITY_STRICT/NORMAL/LOOSE = 0.0002 / 0.001 / 0.004     # インクの割合の上限
+ink_ratio(gray, edge=0.04) -> float
+detect_blank_pages(refs, *, sensitivity=NORMAL, dpi=40, edge=0.04, passwords=None, progress=None, cancel=None) -> list[int]
+```
+
+検出は低解像度のグレー描画。インクの境目は紙の地の色から決める（灰色がかった紙でも判定できる）。
+外周は無視し、孤立した 1px（ごみ）は捨てる。白紙判定は ref.crop 適用後の見た目。自動では削除せず、
+UI（`ui/panels/cleanup_groups.py`）が見つけたページを**選択**するだけ。結果適用時に
+`pl.pages is snapshot` でページ構成の変化を検出し、変わっていたら適用しない。
+
+### core/stamp.py
+
+```python
+@dataclass(frozen=True) class TextStamp: text, position, size_pt, color, opacity, angle, margin_pt, border, bold, start, skip_first
+    # text 中の {n}=ページ番号 {total}=総ページ数。position は POSITIONS（7箇所）
+page_number_stamp(...) / watermark_stamp(text, ...) / label_stamp(text, ...)
+render_stamp_image(stamp, text) -> RGBA        # Pillow で描画（Windows の日本語フォント）。1pt=4px
+class StampPainter(writer): stamp_page(page, stamps, index, total)
+```
+
+アルファ付き(SMask)の画像 XObject として重ねる（日本語フォントの埋め込み不要）。同じ内容の画像は 1 オブジェクトを
+全ページで共有。**`flate_encode()` は圧縮済みの新オブジェクトを返す**（in-place ではない。これを忘れると
+透かしで 17MB になった）。
+
+### core/impose.py
+
+```python
+@dataclass(frozen=True) class ImposeSpec: cols=2, rows=1, paper="A4", landscape=None, margin_mm=8, gutter_mm=4, right_to_left=False, border=False
+PRESETS = {"2in1": ..., "4in1": ...};  PAPER_SIZES_MM
+cell_rects(spec) -> list[(x, y, w, h)]          # 読む順の各枠（原点は用紙左下）
+impose_pages(pages, dest, spec, passwords=None, *, stamps=None, progress=None, cancel=None) -> Path
+```
+
+ページは `prepare_pages(upright=True)` で見た目どおりに整えてから、枠に収まる最大倍率（縦横比維持）で中央に配置。
+スタンプは元のページへ先に重ねる。
+
+### UI
+
+- `ThumbnailView.wheelEvent`: 1ノッチ=サムネイル高さの1/4（Qt 既定は IconMode で 1 行×3 前後と大きく飛ぶ）。
+  タッチパッドの精密スクロール(pixelDelta)はそのまま。Ctrl+ホイールは無視
+- 画像のドロップ/ダイアログ: `MainWindow._on_files_dropped` が画像を含むとき `convert_images` をワーカーで実行してから
+  `_merge_files`。`open_files(paths)`（先頭を開き残りを末尾に結合。起動引数・「開く」ダイアログが使う）
+- `ThumbnailModel.set_crops(mapping)`: 選択を保ったまま該当サムネイルだけ描き直す。キャッシュキーに crop を含む
+- タブ順: 画像書き出し / 圧縮 / ページ操作 / **仕上げ** / バッチ（`win.panels[N]` もこの順）
+- `ui/panels/cleanup_groups.py`（BlankPageGroup / TrimGroup、PageOpsPanel 内。スクロール可）、
+  `ui/panels/finish_panel.py`（FinishPanel。`build_output` / `render_preview` はワーカーから呼ぶ純粋関数）、
+  `ui/preview_dialog.py`（PagePreviewDialog を main_window から切り出し）
