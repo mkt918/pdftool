@@ -25,13 +25,16 @@ from PySide6.QtCore import (
     QModelIndex,
     QLine,
     QPoint,
+    QRect,
     QSize,
     Qt,
+    QTimer,
     Signal,
 )
 from PySide6.QtGui import QColor, QDropEvent, QImage, QPainter, QPen, QPixmap, QPixmapCache
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QListView,
     QStyle,
     QStyledItemDelegate,
@@ -273,7 +276,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
 
 
 class ThumbnailView(QListView):
-    """IconMode のグリッド。複数選択、D&D 並べ替え、ダブルクリック。"""
+    """IconMode のグリッド。複数選択、ドラッグで並べ替え、PDF/画像ファイルのドロップ、ダブルクリック。"""
 
     page_activated = Signal(int)       # ダブルクリックされた行
     selection_changed = Signal(list)   # 選択行（昇順）
@@ -282,8 +285,16 @@ class ThumbnailView(QListView):
     def __init__(self, model: ThumbnailModel, parent: QWidget | None = None):
         super().__init__(parent)
         self._model = model
-        self._internal_drag = False
         self._drop_line: QLine | None = None
+        # 並べ替え（マウスで自前処理。Qt 標準のドラッグは使わない）
+        self._press_pos: QPoint | None = None
+        self._press_row = -1
+        self._reordering = False
+        self._reorder_rows: list[int] = []
+        self._reorder_pos = QPoint()
+        self._autoscroll_timer = QTimer(self)
+        self._autoscroll_timer.setInterval(30)
+        self._autoscroll_timer.timeout.connect(self._tick_autoscroll)
         self.setModel(model)
         self.setItemDelegate(ThumbnailDelegate(self))
         self.setViewMode(QListView.ViewMode.IconMode)
@@ -294,13 +305,12 @@ class ThumbnailView(QListView):
         self.setSpacing(6)
         self.setUniformItemSizes(True)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.setDragEnabled(True)
+        # ページの並べ替えは Qt 標準のドラッグ(Windows では OLE)を使わず、マウス操作を自前で処理する
+        # （標準のドラッグだと実機で「×」になり落とせなかった）。Qt の D&D は外部ファイルの受け取り専用。
+        self.setDragEnabled(False)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(False)   # 挿入位置は paintEvent で自前描画
-        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.setDefaultDropAction(Qt.DropAction.MoveAction)
-        # 保険: 万一 Qt 側が MoveAction 後処理に入っても removeRows ではなく setData（無効）になる
-        self.setDragDropOverwriteMode(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setTextElideMode(Qt.TextElideMode.ElideNone)
         self._apply_size()
@@ -350,19 +360,9 @@ class ThumbnailView(QListView):
             sel.select(idx, idx)
         sm.select(sel, QItemSelectionModel.SelectionFlag.Select)
 
-    # -- D&D（並べ替え / PDF ファイルのドロップ結合） ---------------------------
-    # 内部ドラッグ（サムネイルの並べ替え）は startDrag の間だけ _internal_drag が立つ。
-    # 外部ドラッグ（エクスプローラーからの PDF）は mimeData の URL で判定する。
-    # どちらも Qt 既定の受け入れ判定（アイテム上のドロップは拒否される等）に頼らず、
-    # drag*Event で自前で accept し、挿入位置を縦線で見せる。
-
-    def startDrag(self, supportedActions) -> None:
-        self._internal_drag = True
-        try:
-            super().startDrag(supportedActions)
-        finally:
-            self._internal_drag = False
-            self._clear_drop_hint()
+    # -- PDF・画像ファイルのドロップ（外部ドラッグ。Qt 標準の D&D） -------------------
+    # 受け入れ判定は Qt 既定（アイテム上のドロップを拒否する等）に頼らず自前で accept し、
+    # 挿入位置を縦線で見せる。ドロップ動作は必ず Copy（Move だとエクスプローラーが元ファイルを消す）。
 
     @staticmethod
     def _pdf_paths(mime) -> list[Path]:
@@ -415,64 +415,149 @@ class ThumbnailView(QListView):
         elif pos.y() > self.viewport().height() - margin:
             bar.setValue(bar.value() + 20)
 
-    def _accepts(self, event) -> bool:
-        return self._internal_drag or bool(self._pdf_paths(event.mimeData()))
-
     def dragEnterEvent(self, event) -> None:
-        if self._accepts(event):
-            event.setDropAction(Qt.DropAction.MoveAction if self._internal_drag else Qt.DropAction.CopyAction)
+        if self._pdf_paths(event.mimeData()):
+            event.setDropAction(Qt.DropAction.CopyAction)
             event.accept()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:
-        if not self._accepts(event):
+        if not self._pdf_paths(event.mimeData()):
             event.ignore()
             self._clear_drop_hint()
             return
         pos = event.position().toPoint()
         self._set_drop_hint(self._drop_target(pos)[1])
         self._autoscroll_for_drag(pos)
-        event.setDropAction(Qt.DropAction.MoveAction if self._internal_drag else Qt.DropAction.CopyAction)
+        event.setDropAction(Qt.DropAction.CopyAction)
         event.accept()
 
     def dragLeaveEvent(self, event) -> None:
         self._clear_drop_hint()
         super().dragLeaveEvent(event)
 
-    def paintEvent(self, event) -> None:
-        super().paintEvent(event)
-        if self._drop_line is not None:
-            p = QPainter(self.viewport())
-            pen = QPen(ThumbnailDelegate.BORDER_COLOR)
-            pen.setWidth(4)
-            p.setPen(pen)
-            p.drawLine(self._drop_line)
-            p.end()
-
     def dropEvent(self, event: QDropEvent) -> None:
-        pos = event.position().toPoint()
-        to = self._drop_row(pos)
+        to = self._drop_row(event.position().toPoint())
         self._clear_drop_hint()
-
         paths = self._pdf_paths(event.mimeData())
-        if paths and not self._internal_drag:
-            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            event.setDropAction(Qt.DropAction.CopyAction)
-            event.accept()
-            self.files_dropped.emit(paths, to, shift)
+        if not paths:
+            event.ignore()
             return
+        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        self.files_dropped.emit(paths, to, shift)
 
-        if not self._internal_drag:
-            event.ignore()
+    # -- ページの並べ替え（マウスで自前処理） ------------------------------------------
+    # 押す → しきい値以上動かす → 挿入位置の線と「Nページ」の目印が出る → 離すと移動。Esc で取り消し。
+    # 選択済みのページを押してドラッグすると、選択中のページがまとめて動く。
+
+    @property
+    def reordering(self) -> bool:
+        return self._reordering
+
+    def mousePressEvent(self, e) -> None:
+        self._press_pos = None
+        if e.button() == Qt.MouseButton.LeftButton:
+            idx = self.indexAt(e.position().toPoint())
+            if idx.isValid():
+                self._press_pos = e.position().toPoint()
+                self._press_row = idx.row()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e) -> None:
+        pos = e.position().toPoint()
+        if self._reordering:
+            self._reorder_pos = pos
+            self._update_reorder()
+            e.accept()
             return
-        rows = self.selected_rows()
-        if not rows:
-            event.ignore()
+        if self._press_pos is not None and (e.buttons() & Qt.MouseButton.LeftButton):
+            if (pos - self._press_pos).manhattanLength() >= QApplication.startDragDistance():
+                if self._press_row in self.selected_rows():
+                    self._begin_reorder(pos)
+                    e.accept()
+                    return
+                self._press_pos = None          # 選択されていないページからは動かさない（普通の範囲選択へ）
+            else:
+                e.accept()                      # 小さな手ぶれでは選択範囲を広げない
+                return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e) -> None:
+        if self._reordering and e.button() == Qt.MouseButton.LeftButton:
+            self._end_reorder(apply=True)
+            e.accept()
+            return
+        self._press_pos = None
+        super().mouseReleaseEvent(e)
+
+    def keyPressEvent(self, e) -> None:
+        if self._reordering and e.key() == Qt.Key.Key_Escape:
+            self._end_reorder(apply=False)
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
+    def _begin_reorder(self, pos: QPoint) -> None:
+        self._reordering = True
+        self._reorder_rows = self.selected_rows()
+        self._reorder_pos = pos
+        self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+        self._autoscroll_timer.start()
+        self._update_reorder()
+
+    def _update_reorder(self) -> None:
+        self._set_drop_hint(self._drop_target(self._reorder_pos)[1])
+        self.viewport().update()
+
+    def _tick_autoscroll(self) -> None:
+        """カーソルが上下端にある間は、動かさなくてもスクロールし続ける。"""
+        if not self._reordering:
+            self._autoscroll_timer.stop()
+            return
+        self._autoscroll_for_drag(self._reorder_pos)
+        self._update_reorder()
+
+    def _end_reorder(self, apply: bool) -> None:
+        if not self._reordering:
+            return
+        self._reordering = False
+        self._autoscroll_timer.stop()
+        self.viewport().unsetCursor()
+        rows = self._reorder_rows
+        to = self._drop_target(self._reorder_pos)[0]
+        self._clear_drop_hint()
+        self._press_pos = None
+        # super().mouseReleaseEvent を通さないので、Qt 側の「範囲選択中」状態を自分で戻す
+        self.setState(QAbstractItemView.State.NoState)
+        self.viewport().update()
+        if not apply or not rows:
             return
         n = len(rows)
         self._model.move_pages(rows, to)
         insert_at = to - sum(1 for r in rows if r < to)
         self.select_rows(range(insert_at, insert_at + n))
-        event.setDropAction(Qt.DropAction.IgnoreAction)   # 既定の removeRows を走らせない
-        event.accept()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self._drop_line is None and not self._reordering:
+            return
+        p = QPainter(self.viewport())
+        if self._drop_line is not None:
+            pen = QPen(ThumbnailDelegate.BORDER_COLOR)
+            pen.setWidth(4)
+            p.setPen(pen)
+            p.drawLine(self._drop_line)
+        if self._reordering:
+            text = f"{len(self._reorder_rows)} ページを移動"
+            fm = p.fontMetrics()
+            w, h = fm.horizontalAdvance(text) + 20, fm.height() + 12
+            rect = QRect(self._reorder_pos.x() + 14, self._reorder_pos.y() + 14, w, h)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 90, 200, 230))
+            p.drawRoundedRect(rect, 6, 6)
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+        p.end()

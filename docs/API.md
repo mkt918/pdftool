@@ -463,26 +463,43 @@ NativeFormat 固定で、テストで `setDefaultFormat(IniFormat)` を当てて
 
 ---
 
-## ドラッグ&ドロップ（2026-10-06〜）
+## ドラッグ&ドロップ（2026-10-06〜。並べ替えは同日中に作り直し）
 
-`ThumbnailView` は Qt 既定の受け入れ判定（アイテム上のドロップを拒否する等）に頼らず、
-`dragEnterEvent`/`dragMoveEvent`/`dropEvent` を自前で処理する。
+### ページの並べ替え: マウス操作を自前処理（Qt 標準のドラッグは使わない）
+Qt 標準の内部ドラッグ（`QAbstractItemView.startDrag` → Windows では OLE の `DoDragDrop`）で作ったところ、
+**実機でカーソルが「×」になり落とせなかった**（ハンドラ単体は accept を返していたので、OLE 側との噛み合わせ。
+offscreen では QDrag が即キャンセルされ再現できなかった）。そのため `ThumbnailView` は
+`setDragEnabled(False)` + `DragDropMode.DropOnly` にして、押下・移動・離すを `mouse*Event` で処理する。
 
-- 内部ドラッグ（並べ替え）は `startDrag()` の間だけ `_internal_drag` が True。`event.source()` は使わない
-  （合成イベントのテストでも判定できるように）。ドロップ時は `model.move_pages(rows, to)` →
-  移動後の位置を再選択。`setDropAction(IgnoreAction)` で Qt 既定の `removeRows` を走らせない
-- 外部ドラッグ（エクスプローラー等からの PDF）は `mimeData().hasUrls()` で判定し、`.pdf` のみ受け付け。
-  ドロップ時に `files_dropped(paths: list, to: int, shift: bool)` を emit。`MainWindow._on_files_dropped` が
-  文書あり → `insert_pdfs(paths, to)`（`model.insert_pdf` を順に、位置をずらしながら）、
-  文書なし/Shift → `open_pdf(paths[0])` + 残りを末尾に結合
-- `_drop_target(pos) -> (to, QLine)`: 行ごとの帯（y 範囲）の中で x がアイテム中心より左なら直前、
-  右なら直後。帯が無ければ先頭より上=0・最下行より下=末尾・行間=最寄りの行。
-  線は `paintEvent` で描画（`setDropIndicatorShown(False)`）。ドラッグ中は上下端でスクロール
+- 押下: 左ボタンでアイテムを押したら位置と行を記録して `super()`（通常の選択処理）
+- 移動: しきい値（`QApplication.startDragDistance()`）未満は何もしない（手ぶれで選択範囲を広げない）。
+  超えたとき、押した行が選択済みなら並べ替えモード（`reordering`）に入る。選択外のアイテムからは通常の範囲選択、
+  余白からは通常のラバーバンド選択。並べ替え中は `super().mouseMoveEvent` を呼ばない
+- 表示: 挿入位置の青い縦線、カーソルの横に「Nページを移動」の目印、カーソルは握り手。
+  上下端では `QTimer`(30ms) でカーソルを動かさなくてもスクロールし続ける
+- 離す: `model.move_pages(rows, to)` → 移動後の位置を再選択。Esc で取り消し（`keyPressEvent`）
+- `super().mouseReleaseEvent` を通さないので、`setState(NoState)` で Qt の「範囲選択中」状態を自分で戻す
+  （戻さないと次のマウス移動が範囲選択扱いになる）
+- テストは `QMouseEvent` を `viewport` に `sendEvent`（`QTest.mouseMove` は押下ボタン状態を持たない）
+
+### 外部ファイル（エクスプローラーからの PDF・画像）のドロップ: Qt 標準の D&D
+- `mimeData().hasUrls()` で判定し、`.pdf` と画像拡張子のみ受け付け。`dragEnter/Move/Drop` を自前で accept
+  （Qt 既定はアイテム上のドロップを拒否しうる）
+- **ドロップ動作は必ず Copy**。Move を返すとエクスプローラーが元ファイルを削除する
+- ドロップ時に `files_dropped(paths: list, to: int, shift: bool)` を emit。`MainWindow._on_files_dropped` が
+  文書あり → `insert_pdfs(paths, to)`、文書なし/Shift → `open_pdf(paths[0])` + 残りを末尾に結合
+- `_drop_target(pos) -> (to, QLine)`: 行ごとの帯（y 範囲）の中で x がアイテム中心より左なら直前、右なら直後。
+  帯が無ければ先頭より上=0・最下行より下=末尾・行間=最寄りの行。線は `paintEvent` で描画
 - `MainWindow.dropEvent`（サムネイル外）は末尾に結合
-- テスト: 実マウスによる QDrag は offscreen では即キャンセルされるため再現できない。
-  `QDropEvent` を合成してハンドラを直接呼ぶ（`QMimeData` は所有されないので参照を保持すること。
-  手放すと pytest の repr 時にクラッシュする）
+- 実マウスでの外部ドロップ（OLE）はこの環境では再現できず、合成 `QDropEvent` で検証している
+  （`QMimeData` は所有されないので参照を保持すること。手放すと pytest の repr 時にクラッシュする）
 
+### プレビュー（ダブルクリック）の ＜ ＞ 移動
+`ui/preview_dialog.PagePreviewDialog(image, title, parent, *, count, row, request, title_fn)`。
+`count > 1` かつ `request(row, on_ready)` があると下に「＜ 3 / 12 ＞」バーが出る（←/→・PageUp/PageDown・Home/End も可）。
+`MainWindow._preview_page` は開いた時点の `pl.pages` のスナップショットを使い、`_render_ref_image`
+（回転・トリミング反映、110dpi）をワーカーで実行。見たページは辞書に覚え、読み込み中に閉じられた場合は
+`_alive` で結果を捨てる。仕上げのプレビューは `count=1` で従来どおりボタン無し。
 
 ---
 

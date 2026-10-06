@@ -359,25 +359,6 @@ def test_non_pdf_drop_is_ignored(win: MainWindow, tmp_path: Path):
     assert len(win.page_list) == 2
 
 
-def test_internal_drag_reorders_pages(win: MainWindow, tmp_path: Path):
-    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=4))
-    win.show()
-    QApplication.processEvents()
-    from PySide6.QtCore import QMimeData, QPoint, QPointF
-    from PySide6.QtGui import QDropEvent
-
-    win.view.select_rows([0])
-    win.view._internal_drag = True          # 実際は startDrag の間だけ立つ
-    last = win.view.visualRect(win.view.model().index(3))
-    mime = QMimeData()   # QDropEvent は所有しないので参照を保持しておく
-    ev = QDropEvent(QPointF(last.right() + 1, last.center().y()), Qt.DropAction.MoveAction,
-                    mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
-    win.view.dropEvent(ev)
-    win.view._internal_drag = False
-    assert [r.source_index for r in win.page_list.pages] == [1, 2, 3, 0]
-    assert win.view.selected_rows() == [3]
-
-
 def test_wheel_scroll_moves_a_fraction_of_a_row(win: MainWindow, tmp_path: Path):
     from PySide6.QtCore import QPoint, QPointF
     from PySide6.QtGui import QWheelEvent
@@ -430,3 +411,190 @@ def test_dropping_only_images_without_document_opens_them(win: MainWindow, tmp_p
     _url_drop(win.view, imgs, QPoint(10, 10))
     assert wait_until(lambda: win.page_list is not None and len(win.page_list) == 2)
     assert [r.source_path.name for r in win.page_list.pages] == ["p0.pdf", "p1.pdf"]
+
+
+# ---------------------------------------------------------------------------
+# ページの並べ替え（マウス操作を自前処理。Qt 標準のドラッグは使わない）
+# ---------------------------------------------------------------------------
+def _mouse(view, kind, pos, button=Qt.MouseButton.LeftButton, buttons=Qt.MouseButton.LeftButton,
+           mods=Qt.KeyboardModifier.NoModifier):
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    t = {"press": QEvent.Type.MouseButtonPress, "move": QEvent.Type.MouseMove,
+         "release": QEvent.Type.MouseButtonRelease}[kind]
+    ev = QMouseEvent(t, QPointF(pos), QPointF(view.viewport().mapToGlobal(pos)), button, buttons, mods)
+    QApplication.sendEvent(view.viewport(), ev)
+
+
+def _drag(view, src_row, dst_pos, steps=6):
+    """src_row を押して dst_pos まで動かし、離す（途中の移動も送る）。"""
+    from PySide6.QtCore import QPoint
+
+    start = view.visualRect(view.model().index(src_row)).center()
+    _mouse(view, "press", start)
+    for k in range(1, steps + 1):
+        mid = QPoint(start.x() + (dst_pos.x() - start.x()) * k // steps, start.y() + (dst_pos.y() - start.y()) * k // steps)
+        _mouse(view, "move", mid)
+    _mouse(view, "release", dst_pos, buttons=Qt.MouseButton.NoButton)
+
+
+def _end_of_list(view):
+    from PySide6.QtCore import QPoint
+
+    last = view.visualRect(view.model().index(view.model().rowCount() - 1))
+    return QPoint(last.right() + 1, last.center().y())
+
+
+def test_mouse_drag_reorders_pages(win: MainWindow, tmp_path: Path):
+    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=4))
+    win.show()
+    QApplication.processEvents()
+    _drag(win.view, 0, _end_of_list(win.view))
+    assert [r.source_index for r in win.page_list.pages] == [1, 2, 3, 0]
+    assert win.view.selected_rows() == [3]
+    assert not win.view.reordering
+    from PySide6.QtWidgets import QAbstractItemView
+    assert win.view.state() == QAbstractItemView.State.NoState      # 範囲選択中の状態を引きずらない
+    win.act_undo.trigger()
+    assert [r.source_index for r in win.page_list.pages] == [0, 1, 2, 3]
+
+
+def test_mouse_drag_moves_all_selected_pages(win: MainWindow, tmp_path: Path):
+    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=5))
+    win.show()
+    QApplication.processEvents()
+    win.view.select_rows([0, 1])
+    QApplication.processEvents()
+    _drag(win.view, 0, _end_of_list(win.view))                      # 選択済みの 0 を掴む → 0,1 がまとめて動く
+    assert [r.source_index for r in win.page_list.pages] == [2, 3, 4, 0, 1]
+    assert win.view.selected_rows() == [3, 4]
+
+
+def test_mouse_drag_shows_hint_and_escape_cancels(win: MainWindow, tmp_path: Path):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtCore import QEvent
+
+    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=4))
+    win.show()
+    QApplication.processEvents()
+    v = win.view
+    start = v.visualRect(v.model().index(0)).center()
+    _mouse(v, "press", start)
+    _mouse(v, "move", start + QPoint(40, 0))
+    _mouse(v, "move", _end_of_list(v))
+    assert v.reordering and v._drop_line is not None                # 挿入位置の線が出ている
+    QApplication.sendEvent(v, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier))
+    assert not v.reordering and v._drop_line is None
+    _mouse(v, "release", _end_of_list(v), buttons=Qt.MouseButton.NoButton)
+    assert [r.source_index for r in win.page_list.pages] == [0, 1, 2, 3]   # 取り消したので動かない
+
+
+def test_small_jitter_is_a_click_not_a_reorder(win: MainWindow, tmp_path: Path):
+    from PySide6.QtCore import QPoint
+
+    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=4))
+    win.show()
+    QApplication.processEvents()
+    v = win.view
+    p = v.visualRect(v.model().index(2)).center()
+    _mouse(v, "press", p)
+    _mouse(v, "move", p + QPoint(2, 1))
+    _mouse(v, "release", p + QPoint(2, 1), buttons=Qt.MouseButton.NoButton)
+    assert [r.source_index for r in win.page_list.pages] == [0, 1, 2, 3]
+    assert v.selected_rows() == [2]
+
+
+def test_dragging_from_empty_space_does_not_reorder(win: MainWindow, tmp_path: Path):
+    from PySide6.QtCore import QPoint
+
+    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=2))
+    win.show()
+    QApplication.processEvents()
+    v = win.view
+    blank = QPoint(v.viewport().width() - 10, v.viewport().height() - 10)
+    _mouse(v, "press", blank)
+    _mouse(v, "move", blank - QPoint(200, 150))
+    assert not v.reordering                                         # 余白からは並べ替えにならない（範囲選択）
+    _mouse(v, "release", blank - QPoint(200, 150), buttons=Qt.MouseButton.NoButton)
+    assert [r.source_index for r in win.page_list.pages] == [0, 1]
+
+
+def test_qt_native_drag_is_disabled_so_no_forbidden_cursor(win: MainWindow):
+    """Qt 標準のドラッグを使うと実機で「×」になったので、標準のドラッグは無効にしてある。"""
+    from PySide6.QtWidgets import QAbstractItemView
+
+    assert not win.view.dragEnabled()
+    assert win.view.dragDropMode() == QAbstractItemView.DragDropMode.DropOnly
+
+
+# ---------------------------------------------------------------------------
+# プレビュー（ダブルクリック）の ＜ ＞ ページ移動
+# ---------------------------------------------------------------------------
+def _open_preview(win: MainWindow, row: int):
+    from pdftool.ui.preview_dialog import PagePreviewDialog
+
+    win.view.page_activated.emit(row)
+    assert wait_until(lambda: win.findChildren(PagePreviewDialog))
+    return win.findChildren(PagePreviewDialog)[-1]
+
+
+def test_preview_has_prev_next_buttons_and_navigates(win: MainWindow, tmp_path: Path):
+    win.open_pdf(make_image_pdf(tmp_path / "pv.pdf", pages=4))
+    dlg = _open_preview(win, 1)
+    assert dlg.nav_bar.isVisibleTo(dlg) and dlg.row == 1
+    assert dlg.page_label.text() == "2 / 4" and "2 / 4 ページ目" in dlg.windowTitle()
+    assert dlg.prev_btn.isEnabled() and dlg.next_btn.isEnabled()
+    dlg.next_btn.click()
+    assert wait_until(lambda: dlg.page_label.text() == "3 / 4")      # 読み込み後に表示が更新される
+    assert "3 / 4 ページ目" in dlg.windowTitle()
+    dlg.next_btn.click()
+    assert wait_until(lambda: dlg.page_label.text() == "4 / 4")
+    assert not dlg.next_btn.isEnabled()                              # 最後のページでは「＞」は押せない
+    for _ in range(3):
+        dlg.prev_btn.click()
+    assert wait_until(lambda: dlg.page_label.text() == "1 / 4")
+    assert not dlg.prev_btn.isEnabled()
+
+
+def test_preview_keyboard_navigation_and_cache(win: MainWindow, tmp_path: Path):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+
+    win.open_pdf(make_image_pdf(tmp_path / "pv.pdf", pages=5))
+    dlg = _open_preview(win, 0)
+
+    def key(k):
+        QApplication.sendEvent(dlg, QKeyEvent(QEvent.Type.KeyPress, k, Qt.KeyboardModifier.NoModifier))
+
+    key(Qt.Key.Key_Right)
+    assert wait_until(lambda: dlg.row == 1 and "2 / 5" == dlg.page_label.text())
+    key(Qt.Key.Key_End)
+    assert wait_until(lambda: dlg.page_label.text() == "5 / 5")
+    key(Qt.Key.Key_Home)
+    assert dlg.row == 0 and dlg.page_label.text() == "1 / 5"          # 一度見たページは待たずに表示（キャッシュ）
+    key(Qt.Key.Key_Left)
+    assert dlg.row == 0                                              # 先頭より前には行かない
+
+
+def test_preview_reflects_crop_and_rotation_and_ignores_late_results(win: MainWindow, tmp_path: Path):
+    win.open_pdf(make_image_pdf(tmp_path / "pv.pdf", pages=3))
+    win.model.set_crops({0: (0.0, 0.0, 0.5, 0.0)})                    # 右半分を切る
+    win.model.rotate_pages([0], 90)
+    dlg = _open_preview(win, 0)
+    pm = dlg._label.pixmap()
+    assert pm.width() > pm.height()                                  # 144x384 を回転 → 横長
+    dlg.next_btn.click()
+    dlg.close()                                                      # 読み込み中に閉じても落ちない
+    QApplication.processEvents()
+    assert wait_until(lambda: not win._workers)
+
+
+def test_single_page_preview_without_nav(win: MainWindow, tmp_path: Path):
+    from pdftool.ui.preview_dialog import PagePreviewDialog
+    from PySide6.QtGui import QImage
+
+    dlg = PagePreviewDialog(QImage(50, 50, QImage.Format.Format_RGB32), "t", win)
+    assert not dlg.nav_bar.isVisibleTo(dlg)                          # 仕上げのプレビューなど 1 枚だけのときはボタン無し
+    dlg.close()

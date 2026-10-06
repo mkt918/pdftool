@@ -51,6 +51,12 @@ from pdftool.utils.worker import ThumbnailWorker, Worker, pil_to_qimage
 APP_TITLE = "PDF ユーティリティ"
 
 
+def _render_ref_image(ref, password: str | None) -> QImage:
+    """プレビュー用に 1 ページを描画する（ワーカースレッドで呼ぶ）。回転・トリミング反映。"""
+    with PdfDocument(ref.source_path, password=password) as doc:
+        return pil_to_qimage(doc.render_page(ref.source_index, dpi=110, rotation=ref.rotation, crop=ref.crop))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -431,21 +437,29 @@ class MainWindow(QMainWindow):
     # プレビュー（ダブルクリック）
     # ------------------------------------------------------------------
     def _preview_page(self, row: int) -> None:
+        """ダブルクリックしたページを拡大表示する。下の ＜ ＞ で前後のページへ移動できる。
+
+        開いた時点のページ構成のスナップショットを見る（見ている間に並べ替えても表示は変わらない）。
+        回転・トリミングは反映して表示する。
+        """
         pl = self.page_list
         if not pl or not 0 <= row < len(pl):
             return
-        ref = pl[row]
-        pw = self.thumb_worker._passwords.get(ref.source_path)
+        refs = list(pl.pages)
+        passwords = self.passwords_dict()
+        n = len(refs)
 
-        def render():
-            with PdfDocument(ref.source_path, password=pw) as doc:
-                return pil_to_qimage(doc.render_page(ref.source_index, dpi=110, rotation=ref.rotation))
+        def title_for(r: int) -> str:
+            return f"{r + 1} / {n} ページ目 - {refs[r].source_path.name}"
 
-        def show(img: QImage):
-            dlg = PagePreviewDialog(img, f"{row + 1} ページ目 - {ref.source_path.name}", self)
+        def request(r: int, on_ready) -> None:
+            self.run_worker(_render_ref_image, refs[r], passwords.get(refs[r].source_path), on_finished=on_ready)
+
+        def show(img: QImage) -> None:
+            dlg = PagePreviewDialog(img, title_for(row), self, count=n, row=row, request=request, title_fn=title_for)
             dlg.show()
 
-        self.run_worker(render, on_finished=show)
+        self.run_worker(_render_ref_image, refs[row], passwords.get(refs[row].source_path), on_finished=show)
 
     # ------------------------------------------------------------------
     # D&D / 終了
