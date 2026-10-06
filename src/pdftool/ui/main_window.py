@@ -13,15 +13,13 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QCoreApplication, QSettings, QSize, Qt, QThreadPool
-from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QImage, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QImage, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
-    QDialog,
     QFileDialog,
     QInputDialog,
     QLabel,
@@ -29,11 +27,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QScrollArea,
     QSplitter,
     QTabWidget,
     QToolBar,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -319,6 +315,7 @@ class MainWindow(QMainWindow):
         )
 
     def _merge_files(self, paths: list[Path], at: int, replace: bool) -> None:
+        self.statusBar().clearMessage()      # 「画像を変換しています…」が残ると文書情報が隠れる
         if self.page_list is None or len(self.page_list) == 0 or replace:
             if self.open_pdf(paths[0]) and len(paths) > 1:
                 self.insert_pdfs(paths[1:], len(self.page_list))

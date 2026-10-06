@@ -127,3 +127,30 @@ def test_pagelist_save_with_stamps(blank_pdf: Path):
     out = pl.save(stamps=[page_number_stamp()])
     assert len(PdfReader(str(out)).pages) == 4
     assert dark_bbox(render(out, 0)) is not None
+
+
+def _cropbox_pdf(tmp_path: Path, color=(220, 30, 30)) -> Path:
+    """MediaBox 432x576 のうち、真ん中の 232x376 だけが見える CropBox 付き PDF。"""
+    from PIL import Image
+    from pypdf import PdfWriter
+    from pypdf.generic import RectangleObject
+
+    base = tmp_path / "base.pdf"
+    Image.new("RGB", (600, 800), color).save(base, resolution=100)
+    w = PdfWriter(clone_from=str(base))
+    w.pages[0].cropbox = RectangleObject((100, 100, 332, 476))
+    out = tmp_path / "cropbox.pdf"
+    w.write(out)
+    return out
+
+
+def test_stamp_uses_visible_area_when_cropbox_is_smaller(tmp_path: Path):
+    """CropBox 付きの PDF でも、スタンプは「見えている範囲」の下端・中央に入る。"""
+    src = _cropbox_pdf(tmp_path, color=(255, 255, 255))
+    out = write_pages([PageRef(src, 0)], tmp_path / "o.pdf", stamps=[page_number_stamp("{n}", size_pt=14)])
+    with PdfDocument(out) as d:
+        info = d.page_info(0)
+        box = dark_bbox(d.render_page(0, dpi=72))
+    assert (info.width_pt, info.height_pt) == pytest.approx((232, 376), abs=0.5)
+    assert box is not None, "スタンプが見えている範囲の外に出てしまっている"
+    assert abs((box[0] + box[2]) / 2 - 116) < 15 and box[3] > 376 - 40

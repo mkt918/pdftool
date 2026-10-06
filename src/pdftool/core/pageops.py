@@ -323,6 +323,19 @@ def _open_reader(path: Path, passwords: dict[Path, str]) -> PdfReader:
     return reader
 
 
+def normalize_to_visible_box(page) -> None:
+    """MediaBox/CropBox を「実際に見える範囲」（CropBox と MediaBox の共通部分）に揃える。"""
+    mb, cb = page.mediabox, page.cropbox
+    box = RectangleObject((
+        max(float(mb.left), float(cb.left)), max(float(mb.bottom), float(cb.bottom)),
+        min(float(mb.right), float(cb.right)), min(float(mb.top), float(cb.top)),
+    ))
+    page.mediabox = box
+    page.cropbox = box
+    for name in ("trimbox", "bleedbox", "artbox"):
+        setattr(page, name, box)
+
+
 def apply_crop_to_page(page, crop: Crop) -> None:
     """/Rotate を焼き込み済み(回転0)のページに、(左,上,右,下) の余白割合でトリミングを掛ける。"""
     l, t, r, b = crop
@@ -385,6 +398,9 @@ def prepare_pages(
         if ref.crop or bake:
             # /Rotate を内容に焼き込んでから、見た目基準の余白で切る（ref.rotation はその後）
             added.transfer_rotation_to_content()
+            # CropBox が MediaBox より小さい PDF は「見える範囲」が CropBox。スタンプの位置・面付けの
+            # 倍率はその見える範囲を基準にしたいので、MediaBox を見える範囲に揃える
+            normalize_to_visible_box(added)
         if ref.crop:
             apply_crop_to_page(added, ref.crop)
         if ref.rotation:

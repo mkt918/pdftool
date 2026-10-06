@@ -142,7 +142,10 @@ def auto_crops(
                 doc = docs[ref.source_path] = PdfDocument(ref.source_path, password=passwords.get(ref.source_path))
             c = content_margins(doc, ref.source_index, pad_mm=pad_mm)
             if c is not None:
-                found[i] = c
+                try:
+                    found[i] = validate_crop(c) or (0.0, 0.0, 0.0, 0.0)
+                except ValueError:
+                    pass          # ほとんど何も残らない結果（点だけのページ等）は採用せず、そのページだけ飛ばす
             if progress:
                 progress(ScanProgress(n, total, f"余白を調べています… {n}/{total}"))
     finally:

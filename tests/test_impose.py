@@ -154,3 +154,32 @@ def test_progress_cancel_and_refuses_overwrite(tmp_path: Path):
     from pdftool.core.document import PdfError
     with pytest.raises(PdfError):
         impose_pages(refs, src, PRESETS["2in1"])
+
+
+def test_impose_uses_visible_area_when_cropbox_is_smaller(tmp_path: Path):
+    from pypdf import PdfWriter
+    from pypdf.generic import RectangleObject
+
+    base = color_pdf(tmp_path / "base.pdf", 1)                       # 432x576pt
+    w = PdfWriter(clone_from=str(base))
+    w.pages[0].cropbox = RectangleObject((100, 100, 332, 476))       # 見えるのは 232x376
+    cb = tmp_path / "cb.pdf"
+    w.write(cb)
+    spec = PRESETS["2in1"]
+    out = impose_pages([PageRef(cb, 0)], tmp_path / "o.pdf", spec)
+    x, y, cw, ch = cell_rects(spec)[0]
+    sw, sh = spec.sheet_size_pt()
+    with PdfDocument(out) as d:
+        img = d.render_page(0, dpi=36)
+    s = 36 / 72
+    # 赤い領域の外接矩形（赤=R 大・G 小）
+    r, g, b = img.convert("RGB").split()
+    mask = Image.eval(g, lambda v: 255 if v < 100 else 0)
+    bb = mask.getbbox()
+    assert bb is not None
+    # 見えている 232x376 が枠いっぱい（縦方向 ch に収まる最大倍率）で置かれる
+    expected_scale = min(cw / 232, ch / 376)
+    assert (bb[3] - bb[1]) / s == pytest.approx(376 * expected_scale, rel=0.05)
+    assert (bb[2] - bb[0]) / s == pytest.approx(232 * expected_scale, rel=0.05)
+    cx = (bb[0] + bb[2]) / 2 / s
+    assert cx == pytest.approx(x + cw / 2, abs=6)                    # 枠の中央

@@ -585,3 +585,15 @@ impose_pages(pages, dest, spec, passwords=None, *, stamps=None, progress=None, c
 - `ui/panels/cleanup_groups.py`（BlankPageGroup / TrimGroup、PageOpsPanel 内。スクロール可）、
   `ui/panels/finish_panel.py`（FinishPanel。`build_output` / `render_preview` はワーカーから呼ぶ純粋関数）、
   `ui/preview_dialog.py`（PagePreviewDialog を main_window から切り出し）
+
+### 不具合調査で直したこと（2026-10-06）
+
+- **CropBox が MediaBox より小さい PDF**: スタンプ位置・面付けの倍率/配置が MediaBox 全体を基準にしていて、
+  スタンプが見えない範囲に出る・面付けで小さく偏って置かれていた。`prepare_pages` が /Rotate を焼き込んだ直後に
+  `normalize_to_visible_box(page)`（MediaBox/CropBox を両者の共通部分＝実際に見える範囲に揃える）を呼ぶように修正
+- 画像を開く/結合する流れで、ステータスバーの「画像を変換しています…」が残り続け、文書情報（`lbl_doc`）が
+  隠れたままになっていた → `_merge_files` の先頭で `clearMessage()`。`statusBar().showMessage` の間は
+  `addWidget`（非 permanent）のウィジェットが隠れる点に注意
+- `auto_crops`: ほとんど何も残らない結果（点だけのページ等）で `validate_crop` が ValueError を出し、
+  選択全体の処理がエラーになっていた → そのページだけ飛ばす
+- 向きの違うページを `unify=True` でそろえると、全体を含む範囲＝トリミングなしになるのは仕様どおり（不具合ではない）

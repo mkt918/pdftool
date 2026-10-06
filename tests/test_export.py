@@ -115,3 +115,12 @@ def test_export_refs_multiple_sources(image_pdf: Path, tmp_path: Path):
 def test_export_refs_empty_raises(image_pdf: Path):
     with pytest.raises(ValueError):
         export_refs([], image_pdf)
+
+
+def test_export_refs_applies_crop(image_pdf: Path):
+    """トリミングは画像書き出しにも反映される（回転後の見た目で切る）。"""
+    refs = [PageRef(image_pdf, 0, 0, (0.25, 0.0, 0.25, 0.5)), PageRef(image_pdf, 1, 90, (0.25, 0.0, 0.25, 0.5))]
+    r = export_refs(refs, image_pdf, options=ExportOptions(dpi=72))
+    a, b = (Image.open(f).size for f in r.files)
+    assert a == pytest.approx((144, 192), abs=2)            # 288x384 の左右25%・下50%を切る
+    assert b == pytest.approx((192, 144), abs=2)            # 90度回すと縦横が入れ替わる
