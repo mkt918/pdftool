@@ -13,18 +13,21 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QCoreApplication, QSettings, QSize, Qt, QThreadPool
 from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QImage, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFileDialog,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -45,6 +48,7 @@ from pdftool.ui.panels.export_panel import ExportPanel
 from pdftool.ui.panels.finish_panel import FinishPanel
 from pdftool.ui.panels.pageops_panel import PageOpsPanel
 from pdftool.ui.thumbnail_view import THUMB_SIZES, ThumbnailModel, ThumbnailView
+from pdftool.utils import updater
 from pdftool.utils.gs_locator import find_ghostscript, ghostscript_version
 from pdftool.utils.worker import ThumbnailWorker, Worker, pil_to_qimage
 
@@ -84,6 +88,7 @@ class MainWindow(QMainWindow):
         self.view.page_activated.connect(self._preview_page)
         self.view.selection_changed.connect(self._on_selection_changed)
         self.view.files_dropped.connect(self._on_files_dropped)
+        self.view.context_requested.connect(self._show_context_menu)
         self.model.page_list_changed.connect(self._on_document_changed)
 
         # --- 機能タブ ---
@@ -157,6 +162,12 @@ class MainWindow(QMainWindow):
         self.lbl_doc = QLabel("PDF を開いてください（ドラッグ&ドロップ可）")
         sb.addWidget(self.lbl_doc, 1)
         self.lbl_gs = QLabel()
+        self.btn_update = QPushButton()
+        self.btn_update.setVisible(False)
+        self.btn_update.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_update.clicked.connect(self._start_update)
+        self._update_info: updater.UpdateInfo | None = None
+        sb.addPermanentWidget(self.btn_update)
         sb.addPermanentWidget(self.lbl_gs)
         self.gs_recheck_btn = QPushButton("再検出")
         self.gs_recheck_btn.setFlat(True)
@@ -164,6 +175,55 @@ class MainWindow(QMainWindow):
         self.gs_recheck_btn.clicked.connect(self._recheck_ghostscript)
         sb.addPermanentWidget(self.gs_recheck_btn)
         self._update_gs_label()
+
+    # ------------------------------------------------------------------
+    # 自動更新（GitHub Releases）
+    # ------------------------------------------------------------------
+    def check_for_update(self) -> None:
+        """起動時に裏で最新版を確認する。通信できなくても何も出さない。"""
+        self.run_worker(updater.check_latest, on_finished=self._on_update_checked, on_error=lambda *_: None)
+
+    def _on_update_checked(self, info) -> None:
+        if info is None:
+            return
+        self._update_info = info
+        self.btn_update.setText(f"新しい版 v{info.version} に更新")
+        self.btn_update.setVisible(True)
+
+    def _start_update(self) -> None:
+        info = self._update_info
+        if info is None:
+            return
+        if not updater.is_frozen():
+            QMessageBox.information(self, "更新", "開発実行中は自動更新できません（exe 版で使えます）。")
+            return
+        if self.page_list is not None and self.page_list.is_modified and not self._confirm_discard():
+            return
+        if QMessageBox.question(
+            self, "更新", f"v{info.version} をダウンロードして再起動します。よろしいですか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        exe = Path(sys.executable)
+        dest = exe.with_name(exe.name + ".new")
+        self.btn_update.setEnabled(False)
+
+        def progress(p) -> None:
+            done, total = p
+            self.btn_update.setText(f"ダウンロード中… {done * 100 // total}%" if total else "ダウンロード中…")
+
+        def finished(path) -> None:
+            updater.apply_and_restart(Path(path), exe)
+            self._force_quit = True
+            QApplication.quit()
+
+        def failed(msg: str, _e) -> None:
+            self.btn_update.setEnabled(True)
+            self.btn_update.setText(f"新しい版 v{info.version} に更新")
+            self.show_error(f"更新に失敗しました。\n{msg}")
+
+        self.run_worker(updater.download_update, info, dest,
+                        on_finished=finished, on_error=failed, on_progress=progress)
 
     def _update_gs_label(self) -> None:
         if self.gs_path:
@@ -391,6 +451,37 @@ class MainWindow(QMainWindow):
         except ValueError as e:
             self.show_error(str(e))
 
+    def _show_context_menu(self, global_pos) -> None:
+        self._build_context_menu().exec(global_pos)
+
+    def _build_context_menu(self) -> QMenu:
+        rows = self.view.selected_rows()
+        menu = QMenu(self)
+        if len(rows) == 1:
+            menu.addAction("プレビュー", lambda: self._preview_page(rows[0]))
+            menu.addSeparator()
+        if rows:
+            menu.addAction("左に回転", lambda: self._rotate(-90))
+            menu.addAction("右に回転", lambda: self._rotate(90))
+            menu.addSeparator()
+            menu.addAction("先頭へ移動", lambda: self._move_selected_to(0))
+            menu.addAction("末尾へ移動", lambda: self._move_selected_to(len(self.page_list)))
+            menu.addSeparator()
+            menu.addAction(f"{len(rows)} ページを削除", self._delete)
+            menu.addSeparator()
+        menu.addAction(self.act_select_all)
+        menu.addAction(self.act_undo)
+        menu.addAction(self.act_redo)
+        return menu
+
+    def _move_selected_to(self, to: int) -> None:
+        rows = self.view.selected_rows()
+        if not rows:
+            return
+        self.model.move_pages(rows, to)
+        at = to - sum(1 for r in rows if r < to)
+        self.view.select_rows(range(at, at + len(rows)))
+
     def _select_all(self) -> None:
         pl = self.page_list
         if pl:
@@ -470,7 +561,9 @@ class MainWindow(QMainWindow):
 
     def dragEnterEvent(self, e: QDragEnterEvent) -> None:
         if any(self._is_droppable(u.toLocalFile()) for u in e.mimeData().urls()):
-            e.acceptProposedAction()
+            # 必ず Copy を返す。提案された Move をそのまま返すと、エクスプローラーが元ファイルを削除する
+            e.setDropAction(Qt.DropAction.CopyAction)
+            e.accept()
 
     def dropEvent(self, e: QDropEvent) -> None:
         paths = [Path(u.toLocalFile()) for u in e.mimeData().urls() if self._is_droppable(u.toLocalFile())]
@@ -481,9 +574,13 @@ class MainWindow(QMainWindow):
         replace = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         at = len(self.page_list) if self.page_list is not None else 0
         self._on_files_dropped(paths, at, replace)
-        e.acceptProposedAction()
+        e.setDropAction(Qt.DropAction.CopyAction)     # Move を返すと元ファイルが消される
+        e.accept()
 
     def closeEvent(self, e: QCloseEvent) -> None:
+        if getattr(self, "_force_quit", False):      # 更新による再起動（確認は済み）
+            e.accept()
+            return
         if self.page_list is not None and self.page_list.is_modified and not self._confirm_discard():
             e.ignore()
             return

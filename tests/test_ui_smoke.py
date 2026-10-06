@@ -598,3 +598,52 @@ def test_single_page_preview_without_nav(win: MainWindow, tmp_path: Path):
     dlg = PagePreviewDialog(QImage(50, 50, QImage.Format.Format_RGB32), "t", win)
     assert not dlg.nav_bar.isVisibleTo(dlg)                          # 仕上げのプレビューなど 1 枚だけのときはボタン無し
     dlg.close()
+
+
+def test_viewport_accepts_drops_so_external_files_reach_the_view(win: MainWindow):
+    """実機で判明: viewport が acceptDrops=False だと、外部ファイルのドラッグが一覧に届かず親ウィンドウへ素通りする。"""
+    assert win.view.acceptDrops() and win.view.viewport().acceptDrops()
+
+
+def test_window_level_drop_always_returns_copy_never_move(win: MainWindow, tmp_path: Path):
+    """Move を返すと、エクスプローラーが元のファイルを削除してしまう。"""
+    from PySide6.QtCore import QMimeData, QPointF, QUrl
+    from PySide6.QtGui import QDragEnterEvent, QDropEvent
+    from PySide6.QtCore import QPoint
+
+    pdf = make_image_pdf(tmp_path / "x.pdf", pages=1)
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(pdf))])
+    acts = Qt.DropAction.MoveAction | Qt.DropAction.CopyAction
+    enter = QDragEnterEvent(QPoint(5, 5), acts, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    win.dragEnterEvent(enter)
+    assert enter.isAccepted() and enter.dropAction() == Qt.DropAction.CopyAction
+    drop = QDropEvent(QPointF(5, 5), acts, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    win.dropEvent(drop)
+    assert drop.dropAction() == Qt.DropAction.CopyAction
+    assert wait_until(lambda: win.page_list is not None and len(win.page_list) == 1)
+    assert pdf.exists()
+
+
+def test_context_menu_selects_clicked_page_and_actions_work(win: MainWindow, tmp_path: Path):
+    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=4))
+    win.show()
+    QApplication.processEvents()
+    v = win.view
+    got: list = []
+    v.context_requested.disconnect(win._show_context_menu)   # 本物のメニューは modal で止まるので外す
+    v.context_requested.connect(got.append)
+    from PySide6.QtGui import QContextMenuEvent
+
+    pos = v.visualRect(v.model().index(2)).center()
+    QApplication.sendEvent(
+        v.viewport(), QContextMenuEvent(QContextMenuEvent.Reason.Mouse, pos, v.viewport().mapToGlobal(pos))
+    )
+    assert got and v.selected_rows() == [2]               # 未選択ページの右クリック → そのページを選択
+    texts = [a.text() for a in win._build_context_menu().actions()]
+    assert "プレビュー" in texts and any("削除" in t for t in texts)
+    win._move_selected_to(0)
+    assert [r.source_index for r in win.page_list.pages] == [2, 0, 1, 3]
+    assert v.selected_rows() == [0]
+    win._delete()
+    assert len(win.page_list) == 3

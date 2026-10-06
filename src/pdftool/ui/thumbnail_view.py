@@ -259,7 +259,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
     関係なく選択中だとはっきり分かるようにする。
     """
 
-    BORDER_COLOR = QColor(0, 90, 200)  # 既定のハイライトより濃い、はっきりした青
+    BORDER_COLOR = QColor(37, 99, 235)  # theme.ACCENT。既定のハイライトより濃い、はっきりした青
     BORDER_WIDTH = 4
 
     def paint(self, painter: QPainter, option, index) -> None:
@@ -281,6 +281,15 @@ class ThumbnailView(QListView):
     page_activated = Signal(int)       # ダブルクリックされた行
     selection_changed = Signal(list)   # 選択行（昇順）
     files_dropped = Signal(list, int, bool)   # (PDF パスのリスト, 挿入位置, Shift押下=開き直し)
+    context_requested = Signal(QPoint)        # 右クリック（グローバル座標）。右クリック先は選択済みにしてから emit
+
+    def contextMenuEvent(self, e) -> None:
+        idx = self.indexAt(e.pos())
+        if idx.isValid() and idx.row() not in self.selected_rows():
+            self.select_rows([idx.row()])      # 未選択のページを右クリック → そのページだけ選択
+        if self.model().rowCount():
+            self.context_requested.emit(e.globalPos())
+        e.accept()
 
     def __init__(self, model: ThumbnailModel, parent: QWidget | None = None):
         super().__init__(parent)
@@ -309,6 +318,9 @@ class ThumbnailView(QListView):
         # （標準のドラッグだと実機で「×」になり落とせなかった）。Qt の D&D は外部ファイルの受け取り専用。
         self.setDragEnabled(False)
         self.setAcceptDrops(True)
+        # QAbstractScrollArea ではドロップを実際に受けるのは viewport。view 側だけ True だと viewport が
+        # False のままになり、外部ファイルのドラッグが一覧に届かず親ウィンドウへ素通りした（実機で判明）
+        self.viewport().setAcceptDrops(True)
         self.setDropIndicatorShown(False)   # 挿入位置は paintEvent で自前描画
         self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)

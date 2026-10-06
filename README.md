@@ -85,6 +85,11 @@ where gswin64c
 （AGPLは組み合わせた成果物のソース提供を義務づけるため）。詳細は
 [docs/PLAN.md](docs/PLAN.md) の「ライセンスに関する注意」を参照してください。
 
+**配布と自動更新**: この `.exe` は GitHub Releases（<https://github.com/mkt918/pdftool/releases>）で公開しており、
+起動時に最新版を確認して、ステータスバーの「新しい版に更新」ボタンから差し替えられます。
+同梱の Ghostscript (AGPL) のソースは <https://ghostscript.com/releases/> にあり、このリポジトリのソースと合わせて入手できます。
+新しい版を出すときは `release.bat 0.2.0 "更新内容"` を実行します（テスト・ビルド・タグ付け・Release 公開まで自動）。
+
 ---
 
 ## 使い方

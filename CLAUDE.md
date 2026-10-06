@@ -6,6 +6,11 @@ PDF ユーティリティ（圧縮・画像書き出し・ページ操作・サ�
 1. `docs/PLAN.md` — 仕様・確定事項・フェーズ分担（Opus / Sonnet）
 2. `docs/API.md` — core / utils / UI 骨格の公開インタフェース。**Sonnet フェーズでは変更しない**
 
+## 会話・作業のまとめ保存
+このプロジェクトには会話ログ用の記録規約が無い（`docs/PLAN.md`・`docs/API.md`は設計書）。
+ユーザー共通skill `save`（`~/.claude/skills/save/`）で「ここまでまとめて」等と
+頼まれた場合は、`.claude/summaries/YYYY-MM-DD_見出し.md` に保存する（汎用フォーマット）。
+
 ## 絶対条件
 - `core/` は PySide6 を import しない
 - 原本を上書きしない。出力名は `utils/naming.py` 経由

@@ -48,8 +48,15 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("pdftool")
+    from pdftool.ui.theme import apply_theme
+
+    apply_theme(app)
     win = MainWindow()
     win.show()
+    from pdftool.utils import updater
+
+    if updater.is_frozen():      # exe 版だけ、起動時に最新版を確認する
+        win.check_for_update()
     files = [Path(a) for a in argv if a.lower().endswith(".pdf") or is_image(a)]
     if files:
         win.open_files(files)

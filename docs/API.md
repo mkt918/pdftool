@@ -494,6 +494,19 @@ offscreen では QDrag が即キャンセルされ再現できなかった）。
 - 実マウスでの外部ドロップ（OLE）はこの環境では再現できず、合成 `QDropEvent` で検証している
   （`QMimeData` は所有されないので参照を保持すること。手放すと pytest の repr 時にクラッシュする）
 
+### 実デスクトップでの検証で判明したこと（2026-10-06）
+実画面で OS のマウス入力（`SetCursorPos`/`mouse_event`）を送り、別ウィンドウから `QDrag`（URL）で
+ドロップする形で検証した（ハンドラ単体のテストでは見つからなかった不具合）。
+- **並べ替え**: 実マウスで正常（挿入線・握り手・移動結果とも期待どおり）
+- **`viewport().acceptDrops()` が False のままだった**: `QAbstractScrollArea` で実際にドロップを受けるのは viewport。
+  view 側だけ `setAcceptDrops(True)` だと、外部ファイルのドラッグが一覧に届かず親ウィンドウへ素通りし、
+  「落とした位置に挿入」されず末尾に結合され、挿入線も出なかった → `self.viewport().setAcceptDrops(True)` を明示
+- **ウィンドウ側の dragEnter/dropEvent が提案された動作（Move）をそのまま返していた**: エクスプローラーからの
+  ドラッグは同じドライブだと Move が提案され、返すと**元ファイルが削除されうる** → 常に `CopyAction` を返す
+- 修正後の実画面での再検証は未実施（途中でユーザーが中断。単体テストでは viewport の acceptDrops と Copy 固定を検証済み）
+- 検証用ハーネスは使い捨て（scratchpad）。実マウスを動かすので、実行前に「クリック位置の下が自プロセスのウィンドウか」を
+  `WindowFromPoint` で確認してから押す作りにしてあった
+
 ### プレビュー（ダブルクリック）の ＜ ＞ 移動
 `ui/preview_dialog.PagePreviewDialog(image, title, parent, *, count, row, request, title_fn)`。
 `count > 1` かつ `request(row, on_ready)` があると下に「＜ 3 / 12 ＞」バーが出る（←/→・PageUp/PageDown・Home/End も可）。
