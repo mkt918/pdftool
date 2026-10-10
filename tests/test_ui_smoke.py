@@ -30,7 +30,7 @@ def test_open_and_thumbnails(win: MainWindow, tmp_path: Path):
     assert win.model.rowCount() == 4
     assert wait_until(lambda: len(rendered_rows(win)) == 4)
     pm = win.model.data(win.model.index(0), Qt.ItemDataRole.DecorationRole)
-    assert pm.width() == 180  # 既定「中」
+    assert pm.width() == 240  # 既定「大」
     assert "起動 確認.pdf" in win.windowTitle()
     assert "4 ページ" in win.lbl_doc.text()
 
@@ -44,7 +44,7 @@ def test_toolbar_ops_and_undo(win: MainWindow, tmp_path: Path):
     assert [r.rotation for r in win.page_list.pages] == [0, 90, 90, 0]
     assert win.act_undo.isEnabled()
     # 回転サムネは横長になる
-    assert wait_until(lambda: win.model.data(win.model.index(1), Qt.ItemDataRole.DecorationRole).height() < 180)
+    assert wait_until(lambda: win.model.data(win.model.index(1), Qt.ItemDataRole.DecorationRole).height() < 240)
     win.view.select_rows([0])
     win.act_delete.trigger()
     assert len(win.page_list) == 3
@@ -66,13 +66,13 @@ def test_thumbnail_size_switch(win: MainWindow, tmp_path: Path):
 
 def test_thumbnail_size_persists_via_settings(win: MainWindow, tmp_path: Path):
     """サムネイルサイズは QSettings に保存され、次に開いたウィンドウにも引き継がれる。"""
-    win.size_combo.setCurrentText("大")
-    assert win.settings.value("thumb_size") == "大"
+    win.size_combo.setCurrentText("中")
+    assert win.settings.value("thumb_size_v2") == "中"
 
     win2 = MainWindow()
     try:
-        assert win2.size_combo.currentText() == "大"
-        assert win2.model.thumbnail_width() == 240
+        assert win2.size_combo.currentText() == "中"
+        assert win2.model.thumbnail_width() == 180
     finally:
         win2.thumb_worker.stop()
         win2.close()
@@ -647,3 +647,48 @@ def test_context_menu_selects_clicked_page_and_actions_work(win: MainWindow, tmp
     assert v.selected_rows() == [0]
     win._delete()
     assert len(win.page_list) == 3
+
+
+def test_check_mode_keeps_selection_and_shows_badge_on_export_tab(win: MainWindow, tmp_path: Path):
+    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=4))
+    win.show()
+    QApplication.processEvents()
+    v = win.view
+    assert win.tabs.currentWidget() is win.panels[0] and v.check_mode      # 画像書き出しタブ
+    c = lambda r: v.visualRect(v.model().index(r)).center()
+    for r in (0, 2):
+        _mouse(v, "press", c(r))
+        _mouse(v, "release", c(r), buttons=Qt.MouseButton.NoButton)
+    assert v.selected_rows() == [0, 2]                  # 他をクリックしても選択が残る
+    _mouse(v, "press", c(0))
+    _mouse(v, "release", c(0), buttons=Qt.MouseButton.NoButton)
+    assert v.selected_rows() == [2]                     # 選択済みをもう一度クリックで外れる
+    win.tabs.setCurrentIndex(2)
+    assert not v.check_mode
+
+
+def test_default_thumbnail_is_large(win: MainWindow):
+    assert win.size_combo.currentText() == "大"
+    assert win.model.thumbnail_width() == 240
+
+
+def test_viewer_spread_and_single_modes(win: MainWindow, tmp_path: Path):
+    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=5))
+    win.show()
+    QApplication.processEvents()
+    win.act_viewer.setChecked(True)
+    vw = win.viewer
+    assert win.left_stack.currentWidget() is vw and win.tabs.isVisible()      # 右カラムは残る
+    assert vw.spread and vw.visible_rows() == [0]                             # 表紙は単独
+    vw.step(1)
+    assert vw.visible_rows() == [1, 2]
+    assert win.view.selected_rows() == [1, 2]
+    vw.cover_check.setChecked(False)
+    assert vw.visible_rows() == [0, 1] or vw.visible_rows() == [1, 0] or sorted(vw.visible_rows()) == [0, 1]
+    vw.set_spread(False)
+    vw.go(3)
+    assert vw.visible_rows() == [3]
+    win.act_side.setChecked(False)
+    assert not win.tabs.isVisible()
+    win.act_viewer.setChecked(False)
+    assert win.left_stack.currentWidget() is win.view

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QTabWidget,
     QToolBar,
     QWidget,
@@ -47,6 +48,7 @@ from pdftool.ui.panels.compress_panel import CompressPanel
 from pdftool.ui.panels.export_panel import ExportPanel
 from pdftool.ui.panels.finish_panel import FinishPanel
 from pdftool.ui.panels.pageops_panel import PageOpsPanel
+from pdftool.ui.viewer import ViewerWidget
 from pdftool.ui.thumbnail_view import THUMB_SIZES, ThumbnailModel, ThumbnailView
 from pdftool.utils import updater
 from pdftool.utils.gs_locator import find_ghostscript, ghostscript_version
@@ -55,17 +57,17 @@ from pdftool.utils.worker import ThumbnailWorker, Worker, pil_to_qimage
 APP_TITLE = "PDF ユーティリティ"
 
 
-def _render_ref_image(ref, password: str | None) -> QImage:
+def _render_ref_image(ref, password: str | None, dpi: int = 110) -> QImage:
     """プレビュー用に 1 ページを描画する（ワーカースレッドで呼ぶ）。回転・トリミング反映。"""
     with PdfDocument(ref.source_path, password=password) as doc:
-        return pil_to_qimage(doc.render_page(ref.source_index, dpi=110, rotation=ref.rotation, crop=ref.crop))
+        return pil_to_qimage(doc.render_page(ref.source_index, dpi=dpi, rotation=ref.rotation, crop=ref.crop))
 
 
 class MainWindow(QMainWindow):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle(APP_TITLE)
-        self.resize(1200, 800)
+        self.resize(1260, 900)
         self.setAcceptDrops(True)
 
         # --- 設定の永続化（サムネイルサイズ・最後に使ったフォルダなど） ---
@@ -97,18 +99,31 @@ class MainWindow(QMainWindow):
         for panel_cls in (ExportPanel, CompressPanel, PageOpsPanel, FinishPanel, BatchPanel):
             self._add_panel(panel_cls(self))
 
+        # 左: サムネイル一覧 / ビューア の切り替え
+        self.viewer = ViewerWidget(self._request_viewer_image)
+        self.viewer.row_changed.connect(self._on_viewer_rows)
+        self.viewer.exit_requested.connect(lambda: self.act_viewer.setChecked(False))
+        self.left_stack = QStackedWidget()
+        self.left_stack.addWidget(self.view)
+        self.left_stack.addWidget(self.viewer)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self.view)
+        splitter.addWidget(self.left_stack)
         splitter.addWidget(self.tabs)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([820, 380])
+        # 起動時は「サムネイル大」が横に 3 ページ並ぶ幅（1 セル = 画像幅 + 24、余白・スクロールバー分を足す）
+        left_w = 3 * (THUMB_SIZES["大"] + 24 + 2 * self.view.spacing()) + 48
+        splitter.setSizes([left_w, 400])
         self.setCentralWidget(splitter)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self._build_toolbar()
         self._build_statusbar()
         self._workers: list[Worker] = []   # 実行中ワーカーの参照保持（GC 防止）
+        self._bg_workers: list[Worker] = []   # ビューアの先読み描画（終了確認の対象外）
         self._on_document_changed()
+        self._on_tab_changed(self.tabs.currentIndex())
 
     # ------------------------------------------------------------------
     # 構築
@@ -147,15 +162,27 @@ class MainWindow(QMainWindow):
             "全選択", self._select_all, QKeySequence.StandardKey.SelectAll, "すべてのページを選択"
         )
         tb.addSeparator()
+        self.act_viewer = QAction("ビューア", self)
+        self.act_viewer.setCheckable(True)
+        self.act_viewer.setStatusTip("ページを大きく表示する（見開き／1ページ）。Esc で一覧に戻る")
+        self.act_viewer.toggled.connect(self._set_viewer_mode)
+        tb.addAction(self.act_viewer)
         tb.addWidget(QLabel(" サムネイル: "))
         self.size_combo = QComboBox()
         for name in THUMB_SIZES:
             self.size_combo.addItem(name)
-        saved_size = self.settings.value("thumb_size", "中")
-        self.size_combo.setCurrentText(saved_size if saved_size in THUMB_SIZES else "中")
+        saved_size = self.settings.value("thumb_size_v2", "大")      # 基準を「大」に変えたので別キーで保存
+        self.size_combo.setCurrentText(saved_size if saved_size in THUMB_SIZES else "大")
         self.view.set_thumbnail_width(THUMB_SIZES[self.size_combo.currentText()])
         self.size_combo.currentTextChanged.connect(self._on_thumb_size_changed)
         tb.addWidget(self.size_combo)
+        tb.addSeparator()
+        self.act_side = QAction("右パネル", self)
+        self.act_side.setCheckable(True)
+        self.act_side.setChecked(True)
+        self.act_side.setStatusTip("右側の機能パネルを表示／非表示")
+        self.act_side.toggled.connect(self.tabs.setVisible)
+        tb.addAction(self.act_side)
 
     def _build_statusbar(self) -> None:
         sb = self.statusBar()
@@ -284,6 +311,11 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_doc.setText("PDF を開いてください（ドラッグ&ドロップ可）")
             self.setWindowTitle(APP_TITLE)
+        if self.left_stack.currentWidget() is self.viewer:
+            if has:
+                self.viewer.set_refs(list(pl.pages))
+            else:
+                self.act_viewer.setChecked(False)
         for p in self.panels:
             p.on_document_changed()
 
@@ -489,7 +521,49 @@ class MainWindow(QMainWindow):
 
     def _on_thumb_size_changed(self, name: str) -> None:
         self.view.set_thumbnail_width(THUMB_SIZES[name])
-        self.settings.setValue("thumb_size", name)
+        self.settings.setValue("thumb_size_v2", name)
+
+    # ------------------------------------------------------------------
+    # ビューアモード / チェックモード
+    # ------------------------------------------------------------------
+    def _request_viewer_image(self, ref, on_ready) -> None:
+        # 先読みの描画は「実行中の処理」に数えない（閉じるときに確認ダイアログを出さないため）
+        w = self.run_worker(_render_ref_image, ref, self.passwords_dict().get(ref.source_path), 150,
+                            on_finished=on_ready, on_error=lambda *_: None)
+        if w in self._workers:
+            self._workers.remove(w)
+        self._bg_workers.append(w)       # シグナルの受け手が先に GC されないよう保持
+        w.signals.finished.connect(lambda *_: self._bg_workers.remove(w) if w in self._bg_workers else None)
+        w.signals.error.connect(lambda *_: self._bg_workers.remove(w) if w in self._bg_workers else None)
+
+    def _set_viewer_mode(self, on: bool) -> None:
+        pl = self.page_list
+        if on and not (pl and len(pl)):
+            self.act_viewer.blockSignals(True)
+            self.act_viewer.setChecked(False)
+            self.act_viewer.blockSignals(False)
+            return
+        self.size_combo.setEnabled(not on)
+        if on:
+            rows = self.view.selected_rows()
+            self.viewer.set_refs(list(pl.pages), rows[0] if rows else 0)
+            self.left_stack.setCurrentWidget(self.viewer)
+            self.viewer.setFocus()
+        else:
+            rows = self.view.selected_rows()
+            self.left_stack.setCurrentWidget(self.view)
+            if rows:
+                self.view.scrollTo(self.model.index(rows[0]))
+            self.view.setFocus()
+
+    def _on_viewer_rows(self, rows: list) -> None:
+        """ビューアで見ているページを一覧側の選択にも反映する（回転・削除などがそのページに効く）。"""
+        if rows and self.left_stack.currentWidget() is self.viewer:
+            self.view.select_rows(rows)
+
+    def _on_tab_changed(self, index: int) -> None:
+        # 画像書き出しタブでは、クリックしたページにチェックマークを付けて選択を保つ
+        self.view.set_check_mode(isinstance(self.tabs.widget(index), ExportPanel))
 
     # ------------------------------------------------------------------
     # ワーカー起動口（パネルから使う）

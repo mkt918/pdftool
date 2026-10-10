@@ -46,7 +46,7 @@ from pdftool.core.pageops import PageList, PageRef
 from pdftool.utils.worker import ThumbnailWorker, ThumbRequest
 
 THUMB_SIZES = {"小": 120, "中": 180, "大": 240}
-DEFAULT_THUMB_WIDTH = THUMB_SIZES["中"]
+DEFAULT_THUMB_WIDTH = THUMB_SIZES["大"]   # 基準サイズ（起動時は 3 ページが横に並ぶ幅に合わせる）
 PAGE_ASPECT = 1.414  # プレースホルダは A4 縦の比率
 QPixmapCache.setCacheLimit(256 * 1024)  # KB。180px なら 1000 ページ以上入る
 
@@ -262,6 +262,10 @@ class ThumbnailDelegate(QStyledItemDelegate):
     BORDER_COLOR = QColor(37, 99, 235)  # theme.ACCENT。既定のハイライトより濃い、はっきりした青
     BORDER_WIDTH = 4
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.check_mode = False   # True: 選択中のページの右上にチェックマークを描く（画像書き出し用）
+
     def paint(self, painter: QPainter, option, index) -> None:
         super().paint(painter, option, index)
         if option.state & QStyle.StateFlag.State_Selected:
@@ -272,6 +276,19 @@ class ThumbnailDelegate(QStyledItemDelegate):
             w = self.BORDER_WIDTH
             rect = option.rect.adjusted(w // 2, w // 2, -(w // 2) - 1, -(w // 2) - 1)
             painter.drawRect(rect)
+            if self.check_mode:
+                d = 26
+                badge = QRect(option.rect.right() - d - 8, option.rect.top() + 8, d, d)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setPen(QPen(QColor(255, 255, 255), 2))
+                painter.setBrush(self.BORDER_COLOR)
+                painter.drawEllipse(badge)
+                pen = QPen(QColor(255, 255, 255), 3)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                painter.setPen(pen)
+                x, y = badge.left(), badge.top()
+                painter.drawPolyline([QPoint(x + 7, y + 14), QPoint(x + 11, y + 18), QPoint(x + 19, y + 9)])
             painter.restore()
 
 
@@ -305,7 +322,10 @@ class ThumbnailView(QListView):
         self._autoscroll_timer.setInterval(30)
         self._autoscroll_timer.timeout.connect(self._tick_autoscroll)
         self.setModel(model)
-        self.setItemDelegate(ThumbnailDelegate(self))
+        self._delegate = ThumbnailDelegate(self)
+        self.setItemDelegate(self._delegate)
+        self._check_mode = False
+        self._toggle_off_on_release = False
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setResizeMode(QListView.ResizeMode.Adjust)
         self.setMovement(QListView.Movement.Static)   # 位置は自前の dropEvent で決める
@@ -469,13 +489,34 @@ class ThumbnailView(QListView):
     def reordering(self) -> bool:
         return self._reordering
 
+    # -- チェックモード（画像書き出しタブ） ---------------------------------------------
+    # 普通にクリックするだけで「選択に追加」し、他のページをクリックしても選択を保つ。
+    # 選択済みのページをクリックして離すと選択から外れる。選択済みのページからドラッグすると並べ替え。
+    @property
+    def check_mode(self) -> bool:
+        return self._check_mode
+
+    def set_check_mode(self, on: bool) -> None:
+        self._check_mode = on
+        self._delegate.check_mode = on
+        self.viewport().update()
+
     def mousePressEvent(self, e) -> None:
         self._press_pos = None
+        self._toggle_off_on_release = False
         if e.button() == Qt.MouseButton.LeftButton:
             idx = self.indexAt(e.position().toPoint())
             if idx.isValid():
                 self._press_pos = e.position().toPoint()
                 self._press_row = idx.row()
+                plain = not (e.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+                if self._check_mode and plain:
+                    if idx.row() in self.selected_rows():
+                        self._toggle_off_on_release = True      # 動かさずに離したら外す
+                    else:
+                        self.selectionModel().select(idx, QItemSelectionModel.SelectionFlag.Select)
+                    e.accept()
+                    return
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e) -> None:
@@ -502,6 +543,14 @@ class ThumbnailView(QListView):
             self._end_reorder(apply=True)
             e.accept()
             return
+        if self._toggle_off_on_release and e.button() == Qt.MouseButton.LeftButton:
+            idx = self.indexAt(e.position().toPoint())
+            if idx.isValid() and idx.row() == self._press_row:
+                self.selectionModel().select(idx, QItemSelectionModel.SelectionFlag.Deselect)
+            self._toggle_off_on_release = False
+            self._press_pos = None
+            e.accept()
+            return
         self._press_pos = None
         super().mouseReleaseEvent(e)
 
@@ -513,6 +562,7 @@ class ThumbnailView(QListView):
         super().keyPressEvent(e)
 
     def _begin_reorder(self, pos: QPoint) -> None:
+        self._toggle_off_on_release = False
         self._reordering = True
         self._reorder_rows = self.selected_rows()
         self._reorder_pos = pos
