@@ -100,7 +100,7 @@ def export_pages(
     ファイル名は「元のページ番号」を使う（例: 3, 7 ページを選ぶと _p003, _p007）。
     """
     src = Path(src)
-    folder = naming.output_dir(src, options.fmt, out_dir)
+    folder = naming.output_dir(src, options.fmt, out_dir, reuse_existing=True)
     files: list[Path] = []
     with PdfDocument(src, password=password) as doc:
         idx = list(indices) if indices is not None else list(range(doc.page_count))
@@ -112,7 +112,7 @@ def export_pages(
             if not 0 <= page_index < doc.page_count:
                 raise IndexError(f"ページ番号が範囲外です: {page_index}")
             img = doc.render_page(page_index, dpi=options.dpi)
-            dest = folder / naming.numbered_name(src, page_index + 1, options.ext)
+            dest = naming.unique_path(folder / naming.numbered_name(src, page_index + 1, options.ext))   # 同じフォルダに既にあれば _2…
             _save_image(img, dest, options)
             files.append(dest)
             if progress:
@@ -141,7 +141,7 @@ def export_refs(
         raise ValueError("書き出すページがありません")
     base = Path(base)
     passwords = passwords or {}
-    folder = naming.output_dir(base, options.fmt, out_dir)
+    folder = naming.output_dir(base, options.fmt, out_dir, reuse_existing=True)
     files: list[Path] = []
     docs: dict[Path, PdfDocument] = {}
     try:
@@ -153,7 +153,7 @@ def export_refs(
                 doc = PdfDocument(ref.source_path, password=passwords.get(ref.source_path))
                 docs[ref.source_path] = doc
             img = doc.render_page(ref.source_index, dpi=options.dpi, rotation=ref.rotation, crop=ref.crop)
-            dest = folder / naming.numbered_name(base, i, options.ext)
+            dest = naming.unique_path(folder / naming.numbered_name(base, i, options.ext))   # 同じフォルダに既にあれば _2…
             _save_image(img, dest, options)
             files.append(dest)
             if progress:

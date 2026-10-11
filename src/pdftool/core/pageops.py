@@ -20,8 +20,10 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator, Sequence
 
 from pypdf import PdfReader, PdfWriter
+
 from pypdf.generic import RectangleObject
 
+from pdftool.core.pdfpack import repack_in_place
 from pdftool.core.document import (
     Crop,
     PdfBrokenError,
@@ -419,6 +421,7 @@ def _atomic_write(writer: PdfWriter, dest: Path) -> None:
     try:
         with open(tmp, "wb") as f:
             writer.write(f)
+        repack_in_place(tmp)       # pypdf はオブジェクトストリームを展開して書くので、詰め直して膨らみを戻す
         tmp.replace(dest)
     finally:
         if tmp.exists():

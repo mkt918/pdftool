@@ -63,15 +63,21 @@ def output_dir(
     suffix: str,
     out_dir: Path | None = None,
     today: date | None = None,
+    reuse_existing: bool = False,
 ) -> Path:
     """画像書き出しなど、複数ファイルを入れる専用サブフォルダのパスを決める。
 
     フォルダは作成しない（呼び出し側で mkdir する）。
-    既存なら `_2`, `_3`... を付ける。
+    既存なら `_2`, `_3`... を付ける。ただし reuse_existing=True で、同名のフォルダが
+    既にあれば（同じ日に同じ PDF を書き出したとき）そのフォルダをそのまま使う。
+    その場合、中のファイルは呼び出し側で unique_path を通して上書きを避けること。
     """
     source = origin_of(source)
     parent = out_dir if out_dir is not None else source.parent
-    return unique_path(parent / f"{date_prefix(today)}_{source.stem}_{suffix}")
+    folder = parent / f"{date_prefix(today)}_{source.stem}_{suffix}"
+    if reuse_existing and folder.is_dir():
+        return folder
+    return unique_path(folder)
 
 
 def numbered_name(source: Path, index: int, ext: str, width: int = 3) -> str:

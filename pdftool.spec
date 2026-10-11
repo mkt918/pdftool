@@ -18,6 +18,9 @@ tmp_ret = collect_all('pypdfium2_raw')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('pypdfium2')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+for _pkg in ('pikepdf', 'lxml'):   # 保存時の可逆な詰め直し（core/pdfpack.py）
+    tmp_ret = collect_all(_pkg)
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 # 同梱 Ghostscript（vendor/gs。scripts/bundle_ghostscript.py が用意する）。
 # 無ければ Ghostscript 抜きでビルドされ、実行時は外部インストールを検出するモードになる

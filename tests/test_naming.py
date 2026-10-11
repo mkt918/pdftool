@@ -68,3 +68,14 @@ def test_numbered_name():
     assert numbered_name(src, 1, ".png") == "元 資料_p001.png"
     assert numbered_name(src, 42, "jpg") == "元 資料_p042.jpg"
     assert numbered_name(src, 7, ".png", width=2) == "元 資料_p07.png"
+
+
+def test_output_dir_reuses_existing_folder_when_asked(tmp_path):
+    from datetime import date
+
+    src = tmp_path / "資料.pdf"
+    d1 = output_dir(src, "png", today=date(2026, 9, 12), reuse_existing=True)
+    d1.mkdir()
+    assert output_dir(src, "png", today=date(2026, 9, 12), reuse_existing=True) == d1     # 同じ日・同じ PDF
+    assert output_dir(src, "png", today=date(2026, 9, 13), reuse_existing=True) != d1     # 日が変われば別
+    assert output_dir(src, "png", today=date(2026, 9, 12)).name.endswith("_2")           # 既定は従来どおり
