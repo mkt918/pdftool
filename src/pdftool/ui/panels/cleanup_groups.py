@@ -31,6 +31,7 @@ from pdftool.core.blank import (
     detect_blank_pages,
 )
 from pdftool.core.trim import ScanProgress, auto_crops, manual_crops
+from pdftool.ui.widgets import SliderSpin
 
 if TYPE_CHECKING:
     from pdftool.ui.main_window import MainWindow
@@ -203,10 +204,7 @@ class TrimGroup(_ScanGroup):
         lay.addWidget(self.radio_auto)
 
         auto_form = QFormLayout()
-        self.pad_spin = QDoubleSpinBox()
-        self.pad_spin.setRange(0.0, 50.0)
-        self.pad_spin.setValue(5.0)
-        self.pad_spin.setSuffix(" mm")
+        self.pad_spin = SliderSpin(0.0, 50.0, 5.0)
         auto_form.addRow("内容の周りに残す余白:", self.pad_spin)
         self.unify_check = QCheckBox("選択ページ全体で同じ範囲にそろえる")
         self.unify_check.setToolTip("同じ大きさのスキャン資料で、ページごとにサイズがばらつかないようにします")
@@ -215,15 +213,22 @@ class TrimGroup(_ScanGroup):
 
         lay.addWidget(self.radio_manual)
         man_form = QFormLayout()
-        self.manual_spins: dict[str, QDoubleSpinBox] = {}
+        self.manual_spins: dict[str, SliderSpin] = {}
         for key, label in (("top", "上"), ("bottom", "下"), ("left", "左"), ("right", "右")):
-            sp = QDoubleSpinBox()
-            sp.setRange(0.0, 200.0)
-            sp.setSuffix(" mm")
+            sp = SliderSpin(0.0, 80.0, 0.0)
+            sp.valueChanged.connect(lambda _v: self._update_manual_preview())
             self.manual_spins[key] = sp
             man_form.addRow(f"{label}:", sp)
         lay.addLayout(man_form)
+        live = QLabel("手動は、動かすとサムネイルに切り取られる範囲（暗い部分）がすぐ表示されます。")
+        live.setWordWrap(True)
+        live.setStyleSheet("color: #666;")
+        lay.addWidget(live)
 
+        self.preview_btn = QPushButton("自動の結果をプレビュー")
+        self.preview_btn.setToolTip("自動で切る範囲を調べて、サムネイルに暗く重ねて見せます（適用はしません）")
+        self.preview_btn.clicked.connect(self._auto_preview)
+        lay.addWidget(self.preview_btn)
         btns = QHBoxLayout()
         self.apply_btn = QPushButton("トリミングを適用")
         self.apply_btn.clicked.connect(self._apply)
@@ -247,8 +252,43 @@ class TrimGroup(_ScanGroup):
         auto = self.radio_auto.isChecked()
         self.pad_spin.setEnabled(auto)
         self.unify_check.setEnabled(auto)
+        self.preview_btn.setEnabled(auto and self._worker is None and bool(self.window_.page_list))
         for sp in self.manual_spins.values():
             sp.setEnabled(not auto)
+        self._update_manual_preview()
+
+    # -- プレビュー（サムネイルに切り取り範囲を暗く重ねる） -----------------------------
+    def clear_preview(self) -> None:
+        self.window_.model.set_trim_preview(None)
+
+    def _update_manual_preview(self) -> None:
+        model = self.window_.model
+        if not hasattr(self, "manual_spins") or self.window_.page_list is None:
+            return
+        if self.radio_auto.isChecked():
+            if model.has_trim_preview() and getattr(self, "_preview_kind", "") == "mm":
+                self.clear_preview()
+            return
+        mm = tuple(self.manual_spins[k].value() for k in ("left", "top", "right", "bottom"))
+        self._preview_kind = "mm"
+        model.set_trim_preview(("mm", mm) if any(mm) else None, self._targets())
+
+    def _auto_preview(self) -> None:
+        pl = self.window_.page_list
+        if not pl:
+            return
+        targets = self._targets()
+        self._start(
+            auto_crops, list(pl.pages), targets,
+            pad_mm=self.pad_spin.value(), unify=self.unify_check.isChecked(), passwords=self.window_.passwords_dict(),
+            on_done=lambda m: self._auto_previewed(targets, m),
+        )
+
+    def _auto_previewed(self, targets: list[int], mapping: dict) -> None:
+        self._preview_kind = "crops"
+        self.window_.model.set_trim_preview(("crops", mapping), targets)
+        cut = sum(1 for v in mapping.values() if v)
+        self.status_label.setText(f"{cut} ページの切り取り範囲を暗く表示しています。よければ「トリミングを適用」を押してください。")
 
     def refresh(self) -> None:
         pl = self.window_.page_list
@@ -256,9 +296,15 @@ class TrimGroup(_ScanGroup):
         has = bool(pl) and len(pl) > 0 and self._worker is None
         self.apply_btn.setEnabled(has)
         self.reset_btn.setEnabled(has)
+        self.preview_btn.setEnabled(has and self.radio_auto.isChecked())
+        if getattr(self, "_preview_kind", "") == "crops":
+            self.clear_preview()                 # 対象ページが変わった・編集された → 古いプレビューは捨てる
+            self._preview_kind = ""
+        else:
+            self._update_manual_preview()
 
     def _set_running(self, running: bool) -> None:
-        for w in (self.radio_auto, self.radio_manual, self.apply_btn, self.reset_btn):
+        for w in (self.radio_auto, self.radio_manual, self.apply_btn, self.reset_btn, self.preview_btn):
             w.setEnabled(not running)
         self.cancel_btn.setEnabled(running)
         if running:
@@ -299,6 +345,9 @@ class TrimGroup(_ScanGroup):
         except ValueError as e:
             self.status_label.setText(f"トリミングできませんでした: {e}")
             return
+        finally:
+            self._preview_kind = ""
+            self.clear_preview()       # set_crops 内の refresh で再表示された分も含めて消す
         skipped = len(targets) - len(mapping)
         msg = f"{len(mapping)} ページをトリミングしました。"
         if skipped > 0 and self.radio_auto.isChecked():
@@ -306,6 +355,8 @@ class TrimGroup(_ScanGroup):
         self.status_label.setText(msg + " Ctrl+Z で元に戻せます。")
 
     def _reset(self) -> None:
+        self.clear_preview()
+        self._preview_kind = ""
         targets = self._targets()
         pl = self.window_.page_list
         changed = {i: None for i in targets if pl is not None and pl[i].crop is not None}

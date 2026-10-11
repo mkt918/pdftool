@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from pdftool.core.document import PdfDocument, rotate_crop, validate_crop
 from pdftool.core.images import is_image
 from pdftool.core.pageops import PageList, PageRef
 from pdftool.utils.worker import ThumbnailWorker, ThumbRequest
@@ -78,6 +79,11 @@ class ThumbnailModel(QAbstractListModel):
         self._pending: set[str] = set()
         self._failed: dict[str, str] = {}
         self._placeholder = _placeholder(self._width)
+        # 余白トリミングのプレビュー（適用前に、切り取られる範囲を暗く重ねて見せる）
+        self._trim_preview: tuple | None = None   # ("mm", (左,上,右,下)) か ("crops", {行: Crop})
+        self._trim_rows: set[int] = set()
+        self._page_sizes: dict[Path, list[tuple[float, float]]] = {}
+        self._overlay_cache: dict[tuple, QPixmap] = {}
         worker.ready.connect(self._on_ready)
         worker.failed.connect(self._on_failed)
 
@@ -91,6 +97,7 @@ class ThumbnailModel(QAbstractListModel):
         self._page_list = pl
         self._pending.clear()
         self._failed.clear()
+        self._trim_preview = None
         self._worker.clear_queue()
         self.endResetModel()
         self.page_list_changed.emit()
@@ -134,7 +141,10 @@ class ThumbnailModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return str(row + 1)
         if role == Qt.ItemDataRole.DecorationRole:
-            return self._pixmap_for(ref)
+            pm = self._pixmap_for(ref)
+            if self._trim_preview is not None and row in self._trim_rows and ref.crop is None:
+                pm = self._with_trim_overlay(pm, row, ref)
+            return pm
         if role == Qt.ItemDataRole.ToolTipRole:
             tip = f"{row + 1} ページ目\n{ref.source_path.name} の {ref.source_index + 1} ページ"
             if ref.rotation:
@@ -158,6 +168,70 @@ class ThumbnailModel(QAbstractListModel):
             self._pending.add(key)
             self._worker.request(ThumbRequest(key, ref.source_path, ref.source_index, ref.rotation, self._width, ref.crop))
         return self._placeholder
+
+    # -- 余白トリミングのプレビュー ---------------------------------------------------
+    def set_trim_preview(self, spec: tuple | None, rows: Iterable[int] = ()) -> None:
+        """spec=("mm", (左,上,右,下)) か ("crops", {行: Crop})。None で解除。選択は変えず見た目だけ更新する。"""
+        self._trim_preview = spec
+        self._trim_rows = set(rows)
+        self._overlay_cache.clear()
+        if self.rowCount():
+            self.dataChanged.emit(self.index(0), self.index(self.rowCount() - 1), [Qt.ItemDataRole.DecorationRole])
+
+    def has_trim_preview(self) -> bool:
+        return self._trim_preview is not None
+
+    def _base_size(self, ref: PageRef) -> tuple[float, float] | None:
+        sizes = self._page_sizes.get(ref.source_path)
+        if sizes is None:
+            try:
+                pw = self._worker._passwords.get(ref.source_path)
+                with PdfDocument(ref.source_path, password=pw) as doc:
+                    sizes = [(i.width_pt, i.height_pt) for i in doc.all_page_info()]
+            except Exception:  # noqa: BLE001 — 読めなければプレビューしないだけ
+                sizes = []
+            self._page_sizes[ref.source_path] = sizes
+        return sizes[ref.source_index] if 0 <= ref.source_index < len(sizes) else None
+
+    def _preview_crop(self, row: int, ref: PageRef):
+        kind, data = self._trim_preview
+        try:
+            if kind == "crops":
+                return validate_crop(data.get(row))
+            size = self._base_size(ref)
+            if size is None:
+                return None
+            mm = 72.0 / 25.4
+            l, t, r, b = data
+            return validate_crop((l * mm / size[0], t * mm / size[1], r * mm / size[0], b * mm / size[1]))
+        except ValueError:
+            return None
+
+    def _with_trim_overlay(self, pm: QPixmap, row: int, ref: PageRef) -> QPixmap:
+        crop = self._preview_crop(row, ref)
+        if crop is None:
+            return pm
+        l, t, r, b = rotate_crop(crop, ref.rotation)
+        key = (pm.cacheKey(), l, t, r, b)
+        hit = self._overlay_cache.get(key)
+        if hit is not None:
+            return hit
+        out = QPixmap(pm)
+        w, h = out.width(), out.height()
+        x0, y0, x1, y1 = round(l * w), round(t * h), w - round(r * w), h - round(b * h)
+        p = QPainter(out)
+        shade = QColor(17, 24, 39, 150)
+        for rect in (QRect(0, 0, w, y0), QRect(0, y1, w, h - y1), QRect(0, y0, x0, y1 - y0), QRect(x1, y0, w - x1, y1 - y0)):
+            p.fillRect(rect, shade)
+        pen = QPen(QColor(239, 68, 68))
+        pen.setWidth(2)
+        p.setPen(pen)
+        p.drawRect(QRect(x0, y0, max(1, x1 - x0 - 1), max(1, y1 - y0 - 1)))
+        p.end()
+        if len(self._overlay_cache) > 400:
+            self._overlay_cache.clear()
+        self._overlay_cache[key] = out
+        return out
 
     def _rows_for_key(self, key: str) -> list[int]:
         if self._page_list is None:
@@ -183,6 +257,7 @@ class ThumbnailModel(QAbstractListModel):
         self.page_list_changed.emit()
 
     def _reset(self) -> None:
+        self._trim_preview = None          # 行番号がずれるのでプレビューは解除
         self.beginResetModel()
         self.endResetModel()
         self._after_change()

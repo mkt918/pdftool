@@ -692,3 +692,51 @@ def test_viewer_spread_and_single_modes(win: MainWindow, tmp_path: Path):
     assert not win.tabs.isVisible()
     win.act_viewer.setChecked(False)
     assert win.left_stack.currentWidget() is win.view
+
+
+def test_slider_spin_stays_in_sync():
+    from pdftool.ui.widgets import SliderSpin
+
+    s = SliderSpin(0, 50, 5)
+    got = []
+    s.valueChanged.connect(got.append)
+    s.slider.setValue(125)
+    assert s.value() == 12.5 and got == [12.5]
+    s.setValue(30)
+    assert s.slider.value() == 300
+
+
+def test_trim_manual_preview_overlays_thumbnails_without_changing_pages(win: MainWindow, tmp_path: Path):
+    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=3))
+    win.show()
+    assert wait_until(lambda: len(rendered_rows(win)) == 3)
+    group = next(p for p in win.panels if hasattr(p, "trim_group")).trim_group
+    group.radio_manual.setChecked(True)
+    before = win.model.data(win.model.index(0), Qt.ItemDataRole.DecorationRole).toImage()
+    group.manual_spins["left"].setValue(20.0)
+    assert win.model.has_trim_preview()
+    after = win.model.data(win.model.index(0), Qt.ItemDataRole.DecorationRole).toImage()
+    assert before != after                                  # 切り取り範囲が暗く重なる
+    assert all(r.crop is None for r in win.page_list.pages)   # ページ自体はまだ変えていない
+    group.manual_spins["left"].setValue(0.0)
+    assert not win.model.has_trim_preview()
+    group.manual_spins["left"].setValue(20.0)
+    group.apply_btn.click()
+    assert wait_until(lambda: all(r.crop is not None for r in win.page_list.pages))
+    assert not win.model.has_trim_preview()
+
+
+def test_viewer_shift_one_page_changes_spread_pairing(win: MainWindow, tmp_path: Path):
+    win.open_pdf(make_image_pdf(tmp_path / "a.pdf", pages=6))
+    win.show()
+    QApplication.processEvents()
+    win.act_viewer.setChecked(True)
+    vw = win.viewer
+    vw.go(2)
+    assert vw.cover_check.text() == "1ページずらす" and vw.visible_rows() == [1, 2]
+    vw.cover_check.setChecked(False)                      # ずらしを解除 → 組み合わせが 1-2, 3-4 に変わる
+    assert vw.visible_rows() == [0, 1]      # 組み合わせが 1-2, 3-4 に変わる。見ていた見開きの先頭(2ページ目)は残る
+    vw.step(1)
+    assert vw.visible_rows() == [2, 3]
+    vw.set_spread(False)
+    assert not vw.cover_check.isEnabled()

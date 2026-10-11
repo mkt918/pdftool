@@ -1,6 +1,6 @@
 """ビューアモード: 左のサムネイル一覧の代わりに、ページを大きく読むための表示。
 
-- 「見開き」: 本のように 2 ページを並べる（「表紙を単独」にすると 1 ページ目だけ右側に出る）
+- 「見開き」: 本のように 2 ページを並べる（「1ページずらす」で組み合わせを変えられる。オンだと 1 ページ目だけ右側に出る）
 - 「1ページ」: 1 ページずつ表示
 - ←/→、PageUp/PageDown、Home/End、＜ ＞ ボタンでめくる
 
@@ -98,7 +98,9 @@ class ViewerWidget(QWidget):
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("見開き", True)
         self.mode_combo.addItem("1ページ", False)
-        self.cover_check = QCheckBox("表紙を単独表示")
+        # 見開きの組み合わせを 1 ページずらす（オン: 1 ページ目が単独 → 2-3, 4-5…／オフ: 1-2, 3-4…）
+        self.cover_check = QCheckBox("1ページずらす")
+        self.cover_check.setToolTip("見開きの組み合わせを 1 ページずらします（表紙を単独にしたいときはオン）")
         self.cover_check.setChecked(True)
         self.prev_btn = QPushButton("＜")
         self.next_btn = QPushButton("＞")
@@ -129,12 +131,16 @@ class ViewerWidget(QWidget):
         sl.addWidget(self.right, 1)
         lay.addWidget(stage, 1)
 
-        self.mode_combo.currentIndexChanged.connect(lambda _: self._render())
+        self.mode_combo.currentIndexChanged.connect(lambda _: self._on_mode_changed())
         self.cover_check.toggled.connect(lambda _: self._render())
         self.prev_btn.clicked.connect(lambda: self.step(-1))
         self.next_btn.clicked.connect(lambda: self.step(1))
         for w in (self.mode_combo, self.cover_check, self.prev_btn, self.next_btn, self.exit_btn):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)    # 矢印キーを常にビューアで受ける
+
+    def _on_mode_changed(self) -> None:
+        self.cover_check.setEnabled(self.spread)      # 1 ページ表示では意味がないので無効化
+        self._render()
 
     # -- 状態 -----------------------------------------------------------------
     @property

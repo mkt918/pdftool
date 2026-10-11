@@ -33,9 +33,8 @@ QListView {{
 }}
 QListView::item {{ color: #6b7280; }}
 
-QTabWidget::pane {{
-    background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px; top: -1px;
-}}
+QTabWidget::pane {{ background: transparent; border: none; border-top: 1px solid #e5e7eb; top: -1px; }}
+QTabWidget > QWidget > QWidget {{ background: transparent; }}
 QTabBar::tab {{
     background: transparent; color: #6b7280; padding: 8px 14px; margin-right: 2px;
     border: none; border-bottom: 2px solid transparent;
@@ -58,7 +57,24 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
     selection-background-color: {ACCENT};
 }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {ACCENT}; }}
-QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox::drop-down {{ border: none; width: 24px; }}
+QComboBox::down-arrow {{
+    image: none; width: 0; height: 0; margin-right: 8px;
+    border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #6b7280;
+}}
+QSpinBox::up-button, QDoubleSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    width: 20px; border: none; background: transparent; subcontrol-origin: border;
+}}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{ subcontrol-position: top right; }}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{ subcontrol-position: bottom right; }}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    image: none; width: 0; height: 0;
+    border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 5px solid #6b7280;
+}}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    image: none; width: 0; height: 0;
+    border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #6b7280;
+}}
 QComboBox QAbstractItemView {{
     background: #ffffff; border: 1px solid #d1d5db; selection-background-color: {ACCENT_SOFT};
     selection-color: #1f2937; outline: none;
@@ -66,14 +82,34 @@ QComboBox QAbstractItemView {{
 
 QGroupBox {{
     background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px;
-    margin-top: 14px; padding: 12px 10px 8px 10px;
+    margin-top: 6px; padding: 30px 12px 12px 12px; font-weight: bold; color: #374151;
 }}
 QGroupBox::title {{
-    subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #374151; font-weight: bold;
-    background: #ffffff;
+    subcontrol-origin: padding; subcontrol-position: top left; left: 12px; top: 8px;
+    padding: 0; background: transparent;
 }}
+QGroupBox QLabel, QGroupBox QCheckBox, QGroupBox QRadioButton {{ font-weight: normal; }}
 
-QCheckBox, QRadioButton {{ spacing: 6px; background: transparent; }}
+QCheckBox, QRadioButton {{ spacing: 8px; background: transparent; }}
+QCheckBox::indicator, QRadioButton::indicator {{
+    width: 16px; height: 16px; border: 2px solid #9ca3af; background: #ffffff;
+}}
+QCheckBox::indicator {{ border-radius: 5px; }}
+QRadioButton::indicator {{ border-radius: 9px; }}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {{ border-color: {ACCENT}; }}
+QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QRadioButton::indicator:checked {{ background: #ffffff; border: 5px solid {ACCENT}; }}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{ border-color: #d1d5db; background: #f3f4f6; }}
+
+QSlider::groove:horizontal {{ height: 6px; background: #e5e7eb; border-radius: 3px; }}
+QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 3px; }}
+QSlider::handle:horizontal {{
+    width: 16px; height: 16px; margin: -6px 0; border-radius: 9px; background: #ffffff; border: 2px solid {ACCENT};
+}}
+QSlider::handle:horizontal:hover {{ background: {ACCENT_SOFT}; }}
+QSlider::groove:horizontal:disabled {{ background: #eef0f3; }}
+QSlider::sub-page:horizontal:disabled {{ background: #cbd5e1; }}
+QSlider::handle:horizontal:disabled {{ border-color: #cbd5e1; }}
 QProgressBar {{
     background: #e5e7eb; border: none; border-radius: 6px; text-align: center; height: 12px;
 }}
