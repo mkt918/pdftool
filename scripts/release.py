@@ -37,10 +37,12 @@ def main() -> int:
     run(str(PY), "-m", "pytest", "-q")
     run(str(PY), "scripts/bundle_ghostscript.py")
     run(str(ROOT / ".venv" / "Scripts" / "pyinstaller.exe"), "--noconfirm", "pdftool.spec")
-    built = next((ROOT / "dist").glob("*.exe"))
     asset = ROOT / "dist" / ASSET
-    if built != asset:
-        shutil.copy2(built, asset)
+    # 今ビルドした exe（ASSET 以外で最も新しいもの）を毎回コピーする。
+    # 以前は dist の最初の *.exe を拾っていて、前回の ASSET を再アップロードしてしまった。
+    built = max((p for p in (ROOT / "dist").glob("*.exe") if p != asset), key=lambda p: p.stat().st_mtime)
+    shutil.copy2(built, asset)
+    print(f"添付する exe: {built.name} ({asset.stat().st_size:,} バイト)")
     run("git", "add", "-A")
     run("git", "commit", "-m", f"v{ver}")
     run("git", "tag", f"v{ver}")
