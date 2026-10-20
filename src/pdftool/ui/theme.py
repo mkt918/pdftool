@@ -2,14 +2,42 @@
 
 from __future__ import annotations
 
-from PySide6.QtGui import QFont
+import tempfile
+from pathlib import Path
+
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap, QPolygonF
 from PySide6.QtWidgets import QApplication
 
 ACCENT = "#2563eb"
 ACCENT_HOVER = "#1d4ed8"
 ACCENT_SOFT = "#dbeafe"
 
-QSS = f"""
+def _make_arrow(name: str, up: bool) -> str:
+    """矢印アイコンを PNG で書き出してパスを返す（QSS の border 三角は Qt で描画されないため）。"""
+    d = Path(tempfile.gettempdir()) / "pdftool_theme"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{name}.png"
+    pm = QPixmap(20, 20)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#6b7280"))
+    pts = [(4, 13), (16, 13), (10, 6)] if up else [(4, 7), (16, 7), (10, 14)]
+    p.drawPolygon(QPolygonF([QPointF(x, y) for x, y in pts]))
+    p.end()
+    pm.save(str(path), "PNG")
+    return path.as_posix()
+
+
+def _build_qss() -> str:
+    arrow_up = _make_arrow("arrow_up", True)
+    arrow_down = _make_arrow("arrow_down", False)
+    return QSS_TEMPLATE.replace("{ARROW_UP}", arrow_up).replace("{ARROW_DOWN}", arrow_down)
+
+
+QSS_TEMPLATE = f"""
 * {{ font-family: "Yu Gothic UI", "Segoe UI", "Meiryo UI", sans-serif; }}
 QMainWindow, QDialog {{ background: #f3f4f6; }}
 QWidget {{ color: #1f2937; font-size: 13px; }}
@@ -58,23 +86,14 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
 }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {ACCENT}; }}
 QComboBox::drop-down {{ border: none; width: 24px; }}
-QComboBox::down-arrow {{
-    image: none; width: 0; height: 0; margin-right: 8px;
-    border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #6b7280;
-}}
+QComboBox::down-arrow {{ image: url({{ARROW_DOWN}}); width: 10px; height: 10px; margin-right: 8px; }}
 QSpinBox::up-button, QDoubleSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::down-button {{
     width: 20px; border: none; background: transparent; subcontrol-origin: border;
 }}
 QSpinBox::up-button, QDoubleSpinBox::up-button {{ subcontrol-position: top right; }}
 QSpinBox::down-button, QDoubleSpinBox::down-button {{ subcontrol-position: bottom right; }}
-QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
-    image: none; width: 0; height: 0;
-    border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 5px solid #6b7280;
-}}
-QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
-    image: none; width: 0; height: 0;
-    border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #6b7280;
-}}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{ image: url({{ARROW_UP}}); width: 10px; height: 10px; }}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ image: url({{ARROW_DOWN}}); width: 10px; height: 10px; }}
 QComboBox QAbstractItemView {{
     background: #ffffff; border: 1px solid #d1d5db; selection-background-color: {ACCENT_SOFT};
     selection-color: #1f2937; outline: none;
@@ -146,4 +165,4 @@ def apply_theme(app: QApplication) -> None:
     font.setPointSizeF(max(font.pointSizeF(), 9.5))
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(font)
-    app.setStyleSheet(QSS)
+    app.setStyleSheet(_build_qss())
