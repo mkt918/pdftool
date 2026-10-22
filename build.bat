@@ -1,5 +1,5 @@
 @echo off
-rem Build a standalone .exe (dist\PDFユーティリティ.exe) using PyInstaller.
+rem Build the app folder (dist\PDFユーティリティ\ with the .exe and _internal) using PyInstaller.
 rem Note: English-only messages here for the same reason as run.bat
 rem (cmd.exe's UTF-8 batch handling is unreliable).
 
@@ -40,6 +40,6 @@ if errorlevel 1 (
 )
 
 echo.
-echo Done. The executable is in the "dist" folder.
+echo Done. Copy the whole app folder inside "dist" and run the .exe in it.
 pause
 endlocal

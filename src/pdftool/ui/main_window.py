@@ -232,7 +232,6 @@ class MainWindow(QMainWindow):
         ) != QMessageBox.StandardButton.Yes:
             return
         exe = Path(sys.executable)
-        dest = exe.with_name(exe.name + ".new")
         self.btn_update.setEnabled(False)
 
         def progress(p) -> None:
@@ -249,7 +248,7 @@ class MainWindow(QMainWindow):
             self.btn_update.setText(f"新しい版 v{info.version} に更新")
             self.show_error(f"更新に失敗しました。\n{msg}")
 
-        self.run_worker(updater.download_update, info, dest,
+        self.run_worker(updater.prepare_update, info, exe.parent,
                         on_finished=finished, on_error=failed, on_progress=progress)
 
     def _update_gs_label(self) -> None:

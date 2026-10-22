@@ -442,7 +442,9 @@ NativeFormat 固定で、テストで `setDefaultFormat(IniFormat)` を当てて
 ## exe化（PyInstaller、v1完了後に追加）
 
 - `pdftool.spec`: ビルド定義。`build.bat` から使う（`.venv\Scripts\pyinstaller --noconfirm pdftool.spec`）
-- 出力: `dist\PDFユーティリティ.exe`（onefile / windowed、約80MB）
+- 出力: `dist\PDFユーティリティ\`（**onedir** / windowed、約200MB。v0.4.0 で onefile から変更。
+  onefile は起動のたびに全体を一時フォルダへ展開し Defender の検査も走るため、起動が 4〜8 秒かかっていた → 約 2 秒）。
+  UPX は使わない。Ghostscript は `_internal/gs/` に入り、`sys._MEIPASS` は `_internal` を指す
 - pypdfium2 のネイティブDLL（pypdfium2_raw）は `collect_all` で明示的に同梱している
   （pyinstaller-hooks-contrib に標準フックはあるが、バージョン差異対策として明示）
 - **Ghostscript は同梱する**（2026-09-13〜。PLAN.md のライセンス注意を参照）。
@@ -627,3 +629,54 @@ impose_pages(pages, dest, spec, passwords=None, *, stamps=None, progress=None, c
 - `auto_crops`: ほとんど何も残らない結果（点だけのページ等）で `validate_crop` が ValueError を出し、
   選択全体の処理がエラーになっていた → そのページだけ飛ばす
 - 向きの違うページを `unify=True` でそろえると、全体を含む範囲＝トリミングなしになるのは仕様どおり（不具合ではない）
+
+---
+
+## v0.4.0 の追加（2026-10-22）
+
+### 自動更新（utils/updater.py）— フォルダ形式
+
+```python
+ASSET_NAME = "PDFUtility.zip";  STAGING_DIR = "_update"
+check_latest(current=__version__, *, opener=urlopen) -> UpdateInfo | None
+download_update(info, dest, progress=None) -> Path            # サイズ・sha256 を検証
+extract_update(zip_path, staging) -> Path                      # exe と _internal/ のあるフォルダを返す
+prepare_update(info, app_dir, progress=None) -> Path          # app_dir/_update.zip → app_dir/_update/
+apply_and_restart(staged, current_exe=None) -> None            # バッチで差し替えて再起動
+```
+
+バッチは `_internal` → `_internal_old` の退避を、アプリが終わってロックが外れるまで繰り返し、
+新しい `_internal` と exe を入れてから起動する。途中で失敗したら `_internal_old` を戻して古い版を起動する。
+`scripts/release.py` は `dist/PDFユーティリティ/` をフォルダ名ごと `PDFUtility.zip` にして Release に添付する。
+v0.3.3 以前（`PDFUtility.exe` を探す）からは自動更新されない（初回だけ手で入れ替え）。
+
+### ページを半分に分ける（core/pageops.py）
+
+```python
+SPLIT_MODES = {"lr": ..., "rl": ..., "tb": ...}
+split_crops(crop, rotation, mode) -> list[Crop | None]   # 見た目の半分 2 つ（読む順・回転前の基準）
+PageList.split_pages(indices, mode="lr") -> int           # 1 回の Undo で戻せる
+ThumbnailModel.split_pages(rows, mode) -> int
+```
+
+元ページを複製せず、同じページを半分ずつトリミングした PageRef 2 つに置き換える（保存・面付け・書き出しは既存の
+トリミング処理がそのまま効く）。既にトリミング済みなら残っている範囲を半分にする。UI は PageOpsPanel の
+「ページを半分に分ける」グループ。
+
+### 墨消し（core/redact.py）
+
+```python
+Rect = tuple[float, float, float, float]    # (左, 上, 右, 下) 見た目のページに対する割合
+normalize_rect(rect) -> Rect | None;  normalize_rects(rects) -> tuple[Rect, ...]
+paint_redactions(img, rects) -> Image
+render_redacted(path, index, rotation, crop, rects, password=None, dpi=200) -> Image
+add_image_page(writer, img, dpi=200) -> PageObject
+```
+
+`prepare_pages` / `write_pages` / `impose_pages` に `redactions: dict[int, Sequence[Rect]]`（出力の何ページ目か）を追加。
+該当ページは見た目どおり 200dpi でレンダリング→黒塗り→画像 1 枚のページ（Flate。白黒なら DeviceGray）に置き換える。
+上に黒い四角を重ねるだけだと下の文字が残るため。スタンプはその後に重ねる。
+
+UI: `ui/redact_dialog.py`（RedactCanvas / RedactDialog）。FinishPanel が `{PageRef: (Rect, ...)}` で指定を持ち、
+保存時に `redaction_indices(refs, marks)` で番号へ直す。回転・トリミングで PageRef が変わると指定は外れる
+（ずれた位置を塗らないため。パネルに「外れた指定」の件数を出す）。出力名は墨消しだけなら `_redacted.pdf`。

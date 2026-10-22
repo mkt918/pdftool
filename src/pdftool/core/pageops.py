@@ -24,12 +24,14 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import RectangleObject
 
 from pdftool.core.pdfpack import repack_in_place
+from pdftool.core.redact import Rect, add_image_page, render_redacted
 from pdftool.core.document import (
     Crop,
     PdfBrokenError,
     PdfDocument,
     PdfEncryptedError,
     PdfError,
+    rotate_crop,
     validate_crop,
 )
 from pdftool.core.stamp import StampPainter, TextStamp
@@ -56,6 +58,24 @@ class PageRef:
 
     def rotated(self, delta: int) -> "PageRef":
         return replace(self, rotation=(self.rotation + delta) % 360)
+
+
+SPLIT_MODES = {"lr": "左右（左→右）", "rl": "左右（右→左）", "tb": "上下（上→下）"}
+
+
+def split_crops(crop: Crop | None, rotation: int, mode: str) -> list[Crop | None]:
+    """見た目（回転後）で半分に割った 2 つのトリミング余白を、読む順に返す（回転前の基準に直して）。"""
+    l, t, r, b = rotate_crop(crop or (0.0, 0.0, 0.0, 0.0), rotation)
+    if mode == "tb":
+        half = (1.0 - t - b) / 2
+        parts = [(l, t, r, b + half), (l, t + half, r, b)]
+    else:
+        half = (1.0 - l - r) / 2
+        parts = [(l, t, r + half, b), (l + half, t, r, b)]
+        if mode == "rl":
+            parts.reverse()
+    back = (360 - rotation) % 360
+    return [validate_crop(rotate_crop(p, back)) for p in parts]
 
 
 def _normalize_indices(indices: Iterable[int], n: int) -> list[int]:
@@ -258,6 +278,25 @@ class PageList:
             for i, r in enumerate(self._pages)
         )
 
+    def split_pages(self, indices: Iterable[int], mode: str = "lr") -> int:
+        """指定ページを、見た目の半分ずつ 2 ページに分ける（A3 見開き → A4 2 枚など）。
+
+        mode: "lr"=左→右、"rl"=右→左（縦書き・右開き）、"tb"=上→下。
+        元ページを複製するのではなく、同じページを半分ずつトリミングした PageRef 2 つに置き換える。
+        既にトリミング済みなら、残っている範囲を半分にする。増えたページ数を返す。
+        """
+        if mode not in SPLIT_MODES:
+            raise ValueError(f"不明な分割方法です: {mode}")
+        idx = set(_normalize_indices(indices, len(self._pages)))
+        out: list[PageRef] = []
+        for i, r in enumerate(self._pages):
+            if i in idx:
+                out.extend(replace(r, crop=c) for c in split_crops(r.crop, r.rotation, mode))
+            else:
+                out.append(r)
+        self._commit(out)
+        return len(idx)
+
     def reorder(self, new_order: Sequence[int]) -> None:
         """new_order[k] = 新しい k 番目に来る旧インデックス（完全な順列であること）。"""
         n = len(self._pages)
@@ -371,6 +410,7 @@ def prepare_pages(
     *,
     upright: bool = False,
     stamps: Sequence[TextStamp] | None = None,
+    redactions: dict[int, Sequence[Rect]] | None = None,
     progress: Callable[[WriteProgress], None] | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> Iterator:
@@ -380,6 +420,8 @@ def prepare_pages(
     （面付けなど、ページを別の用紙へ配置する用途）。トリミング・スタンプを使うときも焼き込む
     （しおり・リンク注釈の位置は回転ページで正しくなくなりうる）。
     どちらも使わない通常保存では、従来通り /Rotate の加算だけで元ページの構造を壊さない。
+    redactions（{ページ番号: 範囲の列}）にあるページは、黒塗りを描き込んだ画像のページに置き換える
+    （core/redact.py。見た目どおり・回転 0 で作るので、回転・トリミングの処理は要らない）。
     """
     passwords = passwords or {}
     painter = StampPainter(writer) if stamps else None
@@ -389,6 +431,16 @@ def prepare_pages(
     for i, ref in enumerate(pages):
         if cancel is not None and cancel():
             raise WriteCancelled()
+        if redactions and redactions.get(i):
+            img = render_redacted(ref.source_path, ref.source_index, ref.rotation, ref.crop,
+                                  redactions[i], passwords.get(ref.source_path))
+            added = add_image_page(writer, img)
+            if painter is not None:
+                painter.stamp_page(added, list(stamps), i, total)
+            if progress:
+                progress(WriteProgress(i + 1, total, f"ページを処理しています… {i + 1}/{total}"))
+            yield added
+            continue
         reader = readers.get(ref.source_path)
         if reader is None:
             reader = readers[ref.source_path] = _open_reader(ref.source_path, passwords)
@@ -445,6 +497,7 @@ def write_pages(
     passwords: dict[Path, str] | None = None,
     *,
     stamps: Sequence[TextStamp] | None = None,
+    redactions: dict[int, Sequence[Rect]] | None = None,
     progress: Callable[[WriteProgress], None] | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> Path:
@@ -453,13 +506,15 @@ def write_pages(
     - 元ファイルと同じパスへの書き出しは拒否（原本を上書きしない）
     - dest が既に存在すれば `_2`, `_3` … を付けた別名にする
     - stamps を渡すと、ページ番号・透かし・ラベルを重ねる（core/stamp.py）
+    - redactions を渡すと、そのページを墨消しする（core/redact.py）
     - 戻り値は実際に書いたパス
     """
     if not pages:
         raise ValueError("書き出すページがありません")
     dest = check_dest(pages, dest)
     writer = PdfWriter()
-    for _ in prepare_pages(pages, writer, passwords, stamps=stamps, progress=progress, cancel=cancel):
+    for _ in prepare_pages(pages, writer, passwords, stamps=stamps, redactions=redactions,
+                           progress=progress, cancel=cancel):
         pass
     _atomic_write(writer, dest)
     return dest

@@ -1,7 +1,8 @@
-"""仕上げパネル: ページ番号・透かし・ラベルの追加と、面付け（2in1/4in1）をして新しい PDF に保存する。
+"""仕上げパネル: ページ番号・透かし・ラベルの追加、墨消し、面付け（2in1/4in1）をして新しい PDF に保存する。
 
 現在の並び・回転・トリミングを反映して、元の PDF は変えずに新規ファイルを作る。
-出力先は元ファイルと同じ場所（日付_元名_stamped.pdf / _2in1.pdf …）。
+出力先は元ファイルと同じ場所（日付_元名_stamped.pdf / _redacted.pdf / _2in1.pdf …）。
+墨消しの範囲は PageRef ごとに持つ（ui/redact_dialog.py）。保存時に「何ページ目か」へ直して core に渡す。
 プレビューは先頭ページ（スタンプを付ける最初のページ）を一時ファイルに作って表示する。
 """
 
@@ -34,6 +35,7 @@ from pdftool.core.compress import format_size
 from pdftool.core.document import PdfDocument
 from pdftool.core.impose import PAPER_SIZES_MM, PRESETS, ImposeSpec, impose_pages
 from pdftool.core.pageops import PageRef, WriteProgress, write_pages
+from pdftool.core.redact import Rect
 from pdftool.core.stamp import (
     POSITION_LABELS,
     POSITIONS,
@@ -44,6 +46,7 @@ from pdftool.core.stamp import (
 )
 from pdftool.ui.panels.base import PanelBase
 from pdftool.ui.preview_dialog import PagePreviewDialog
+from pdftool.ui.redact_dialog import RedactDialog
 from pdftool.utils import naming, tempfiles
 from pdftool.utils.worker import pil_to_qimage
 
@@ -68,12 +71,20 @@ def build_output(
     stamps: Sequence[TextStamp],
     impose: ImposeSpec | None,
     passwords: dict[Path, str] | None = None,
+    redactions: dict[int, Sequence[Rect]] | None = None,
     progress=None,
     cancel=None,
 ) -> Path:
     if impose is not None:
-        return impose_pages(refs, dest, impose, passwords, stamps=stamps or None, progress=progress, cancel=cancel)
-    return write_pages(refs, dest, passwords, stamps=stamps or None, progress=progress, cancel=cancel)
+        return impose_pages(refs, dest, impose, passwords, stamps=stamps or None, redactions=redactions or None,
+                            progress=progress, cancel=cancel)
+    return write_pages(refs, dest, passwords, stamps=stamps or None, redactions=redactions or None,
+                       progress=progress, cancel=cancel)
+
+
+def redaction_indices(refs: Sequence[PageRef], marks: dict[PageRef, Sequence[Rect]]) -> dict[int, Sequence[Rect]]:
+    """PageRef ごとの指定を、refs の何番目かへ直す。"""
+    return {i: marks[r] for i, r in enumerate(refs) if marks.get(r)}
 
 
 def render_preview(
@@ -81,14 +92,23 @@ def render_preview(
     stamps: Sequence[TextStamp],
     impose: ImposeSpec | None,
     passwords: dict[Path, str] | None = None,
+    marks: dict[PageRef, Sequence[Rect]] | None = None,
 ):
-    """先頭の出力ページ（面付けなら先頭の 1 枚）を作ってレンダリングした QImage を返す。"""
+    """先頭の出力ページ（面付けなら先頭の 1 枚）を作ってレンダリングした QImage を返す。
+
+    スタンプが無く墨消しだけなら、墨消しした最初のページを見せる。
+    """
+    marks = marks or {}
     skip = min((s.skip_first for s in stamps), default=0)
+    if not stamps and marks:
+        skip = next((i for i, r in enumerate(refs) if marks.get(r)), 0)
     per = impose.per_sheet if impose else 1
+    if impose:
+        skip -= skip % per                  # 面付けは用紙の区切りから
     sample = list(refs[skip: skip + per]) or list(refs[:per])
     shifted = [replace(s, skip_first=max(0, s.skip_first - skip)) for s in stamps]
     tmp = tempfiles.new_subdir() / "preview.pdf"
-    out = build_output(sample, tmp, shifted, impose, passwords)
+    out = build_output(sample, tmp, shifted, impose, passwords, redaction_indices(sample, marks))
     with PdfDocument(out) as doc:
         return pil_to_qimage(doc.render_page(0, dpi=90))
 
@@ -100,6 +120,7 @@ class FinishPanel(PanelBase):
         super().__init__(window, parent)
         self._worker = None
         self._last_output: Path | None = None
+        self._marks: dict[PageRef, tuple[Rect, ...]] = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -112,7 +133,7 @@ class FinishPanel(PanelBase):
         lay = QVBoxLayout(body)
 
         intro = QLabel(
-            "ページ番号・透かし・ラベルの追加や、2in1/4in1の面付けをして、新しいPDFとして保存します。"
+            "ページ番号・透かし・ラベルの追加や墨消し、2in1/4in1の面付けをして、新しいPDFとして保存します。"
             "今の並び・回転・トリミングが反映され、元のPDFは変わりません。"
         )
         intro.setWordWrap(True)
@@ -124,6 +145,7 @@ class FinishPanel(PanelBase):
         lay.addWidget(self._build_page_number())
         lay.addWidget(self._build_watermark())
         lay.addWidget(self._build_label())
+        lay.addWidget(self._build_redact())
         lay.addWidget(self._build_impose())
 
         btns = QHBoxLayout()
@@ -246,6 +268,21 @@ class FinishPanel(PanelBase):
         f.addRow(self.lb_border)
         return self.lb_box
 
+    def _build_redact(self) -> QGroupBox:
+        self.rd_box = self._checkable_box("墨消し（黒塗り）", False)
+        v = QVBoxLayout(self.rd_box)
+        note = QLabel("墨消ししたページは画像に置き換わり、下の文字は完全に消えます"
+                      "（そのページの文字は選択・検索できなくなります）。")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-weight: normal;")
+        v.addWidget(note)
+        self.rd_edit_btn = QPushButton("範囲を指定…")
+        self.rd_edit_btn.clicked.connect(self._edit_redactions)
+        v.addWidget(self.rd_edit_btn)
+        self.rd_label = QLabel()
+        v.addWidget(self.rd_label)
+        return self.rd_box
+
     def _build_impose(self) -> QGroupBox:
         self.im_box = self._checkable_box("面付け（1枚の用紙に複数ページ）", False)
         f = QFormLayout(self.im_box)
@@ -298,13 +335,41 @@ class FinishPanel(PanelBase):
             right_to_left=self.im_rtl.isChecked(), border=self.im_border.isChecked(),
         )
 
+    def _current_marks(self) -> dict[PageRef, tuple[Rect, ...]]:
+        """今のページにまだある指定だけ（回転などで外れたものは除く）。"""
+        pl = self.window_.page_list
+        live = set(pl.pages) if pl else set()
+        return {r: v for r, v in self._marks.items() if r in live}
+
+    def _collect_marks(self) -> dict[PageRef, tuple[Rect, ...]]:
+        if not self.rd_box.isChecked():
+            return {}
+        marks = self._current_marks()
+        if not marks:
+            raise ValueError("墨消しの範囲が指定されていません（「範囲を指定…」から囲んでください）")
+        return marks
+
     def _settings(self):
-        """(stamps, impose)。何も選ばれていない・値が不正なら ValueError。"""
+        """(stamps, impose, marks)。何も選ばれていない・値が不正なら ValueError。"""
         stamps = self._collect_stamps()
         impose = self._collect_impose()
-        if not stamps and impose is None:
-            raise ValueError("ページ番号・透かし・ラベル・面付けのうち、どれかにチェックを入れてください")
-        return stamps, impose
+        marks = self._collect_marks()
+        if not stamps and impose is None and not marks:
+            raise ValueError("ページ番号・透かし・ラベル・墨消し・面付けのうち、どれかにチェックを入れてください")
+        return stamps, impose, marks
+
+    def _edit_redactions(self) -> None:
+        pl = self.window_.page_list
+        if not pl:
+            return
+        rows = self.window_.view.selected_rows()
+        dlg = RedactDialog(list(pl.pages), self._current_marks(), self.window_.passwords_dict(),
+                           row=rows[0] if rows else 0, parent=self.window_)
+        if dlg.exec() == RedactDialog.DialogCode.Accepted:
+            self._marks = dlg.marks()
+            if self._marks:
+                self.rd_box.setChecked(True)
+        self._update_state()
 
     # -- 状態 ---------------------------------------------------------------
     def on_document_changed(self) -> None:
@@ -317,9 +382,17 @@ class FinishPanel(PanelBase):
         self.target_label.setText(f"対象: 全 {len(pl)} ページ" if has else "PDF を開くと使えます")
         self.run_btn.setEnabled(has and not running)
         self.preview_btn.setEnabled(has and not running)
+        self.rd_edit_btn.setEnabled(has and not running)
+        marks = self._current_marks()
+        lost = len(self._marks) - len(marks)
+        text = (f"{len(marks)} ページ・{sum(len(v) for v in marks.values())} か所を指定済み" if marks
+                else "まだ指定していません")
+        if lost:
+            text += f"（回転・トリミング・削除で外れた指定が {lost} ページ分あります）"
+        self.rd_label.setText(text)
 
     def _set_running_ui(self, running: bool) -> None:
-        for box in (self.num_box, self.wm_box, self.lb_box, self.im_box):
+        for box in (self.num_box, self.wm_box, self.lb_box, self.rd_box, self.im_box):
             box.setEnabled(not running)
         self.cancel_btn.setEnabled(running)
 
@@ -329,12 +402,12 @@ class FinishPanel(PanelBase):
         if not pl:
             return
         try:
-            stamps, impose = self._settings()
+            stamps, impose, marks = self._settings()
         except ValueError as e:
             self.window_.show_error(str(e))
             return
         refs = list(pl.pages)
-        suffix = impose.label if impose else "stamped"
+        suffix = impose.label if impose else ("redacted" if marks and not stamps else "stamped")
         dest = naming.output_file(refs[0].source_path, suffix, ".pdf")
         passwords = self.window_.passwords_dict()
 
@@ -345,7 +418,7 @@ class FinishPanel(PanelBase):
         self.progress.setValue(0)
         self.status_label.setText("仕上げています…")
         self._worker = self.window_.run_worker(
-            build_output, refs, dest, stamps, impose, passwords,
+            build_output, refs, dest, stamps, impose, passwords, redaction_indices(refs, marks),
             on_finished=self._on_finished, on_error=self._on_error,
             on_progress=self._on_progress, on_cancelled=self._on_cancelled,
         )
@@ -356,14 +429,14 @@ class FinishPanel(PanelBase):
         if not pl:
             return
         try:
-            stamps, impose = self._settings()
+            stamps, impose, marks = self._settings()
         except ValueError as e:
             self.window_.show_error(str(e))
             return
         refs = list(pl.pages)
         self.status_label.setText("プレビューを作っています…")
         self.window_.run_worker(
-            render_preview, refs, stamps, impose, self.window_.passwords_dict(),
+            render_preview, refs, stamps, impose, self.window_.passwords_dict(), marks,
             on_finished=self._show_preview,
             on_error=lambda msg, _e: self.status_label.setText(f"エラー: {msg}"),
         )

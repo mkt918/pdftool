@@ -268,6 +268,13 @@ class ThumbnailModel(QAbstractListModel):
         self._page_list.remove(rows)
         self._reset()
 
+    def split_pages(self, rows: Iterable[int], mode: str) -> int:
+        if self._page_list is None:
+            return 0
+        n = self._page_list.split_pages(rows, mode)
+        self._reset()
+        return n
+
     def rotate_pages(self, rows: Iterable[int], delta: int) -> None:
         if self._page_list is None:
             return

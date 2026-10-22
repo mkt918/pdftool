@@ -5,6 +5,7 @@
   - 範囲文字列（'1-5,8,10-12'）によるページ選択
   - 任意位置への PDF 挿入（末尾への結合はツールバーの「結合…」で足りる）
   - 分割（選択ページ / 全ページを別ファイルへ書き出す）
+  - ページを半分に分ける（A3 見開き → A4 2 ページ。編集状態の変更なので Undo できる）
   - 白紙ページの検出（見つけて選択するだけ。削除は確認してから）
   - 余白トリミング（自動 / 手動 mm）
 項目が多いのでスクロールできるようにしてある。
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -29,7 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from pdftool.core.document import PdfEncryptedError, PdfError
-from pdftool.core.pageops import parse_page_spec
+from pdftool.core.pageops import SPLIT_MODES, parse_page_spec
 from pdftool.ui.panels.base import PanelBase
 from pdftool.ui.panels.cleanup_groups import BlankPageGroup, TrimGroup
 
@@ -83,6 +85,21 @@ class PageOpsPanel(PanelBase):
         split_lay.addWidget(self.split_all_btn)
         lay.addWidget(split_box)
 
+        halve_box = QGroupBox("ページを半分に分ける（見開き→2ページ）")
+        halve_lay = QVBoxLayout(halve_box)
+        self.halve_mode = QComboBox()
+        for key, label in SPLIT_MODES.items():
+            self.halve_mode.addItem(label, key)
+        self.halve_mode.setToolTip("縦書き・右開きの見開きは「右→左」にすると読む順に並びます")
+        halve_lay.addWidget(self.halve_mode)
+        self.halve_selected_btn = QPushButton("選択ページを分ける")
+        self.halve_selected_btn.clicked.connect(lambda: self._halve(selected=True))
+        halve_lay.addWidget(self.halve_selected_btn)
+        self.halve_all_btn = QPushButton("全ページを分ける")
+        self.halve_all_btn.clicked.connect(lambda: self._halve(selected=False))
+        halve_lay.addWidget(self.halve_all_btn)
+        lay.addWidget(halve_box)
+
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
         lay.addWidget(self.status_label)
@@ -113,9 +130,10 @@ class PageOpsPanel(PanelBase):
         self.select_btn.setEnabled(has_doc)
         self.insert_btn.setEnabled(has_doc and not running)
         self.split_all_btn.setEnabled(has_doc and not running)
-        self.split_selected_btn.setEnabled(
-            has_doc and not running and bool(self.window_.view.selected_rows())
-        )
+        has_sel = bool(self.window_.view.selected_rows())
+        self.split_selected_btn.setEnabled(has_doc and not running and has_sel)
+        self.halve_all_btn.setEnabled(has_doc)
+        self.halve_selected_btn.setEnabled(has_doc and has_sel)
 
     # -- 選択 -------------------------------------------------------------
     def _select_by_spec(self) -> None:
@@ -161,6 +179,21 @@ class PageOpsPanel(PanelBase):
                 return
         self.window_.view.select_rows(range(at, at + n))
         self.status_label.setText(f"{n} ページを挿入しました")
+
+    # -- 半分に分ける（PageRef のトリミングを変えるだけなので即時） ----------------
+    def _halve(self, selected: bool) -> None:
+        pl = self.window_.page_list
+        if pl is None or len(pl) == 0:
+            return
+        rows = self.window_.view.selected_rows() if selected else list(range(len(pl)))
+        if not rows:
+            return
+        try:
+            n = self.window_.model.split_pages(rows, self.halve_mode.currentData())
+        except ValueError as e:
+            self.window_.show_error(str(e))
+            return
+        self.status_label.setText(f"{n} ページを 2 つずつに分けました（元に戻すで取り消せます）")
 
     # -- 分割（重い可能性があるので別スレッド） -----------------------------
     def _split_selected(self) -> None:

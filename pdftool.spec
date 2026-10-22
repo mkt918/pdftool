@@ -22,7 +22,7 @@ for _pkg in ('pikepdf', 'lxml'):   # 保存時の可逆な詰め直し（core/pd
     tmp_ret = collect_all(_pkg)
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
-# 同梱 Ghostscript（vendor/gs。scripts/bundle_ghostscript.py が用意する）。
+# 同梱 Ghostscript（vendor/gs。scripts/bundle_ghostscript.py が用意する）。_internal/gs/ に置かれる。
 # 無ければ Ghostscript 抜きでビルドされ、実行時は外部インストールを検出するモードになる
 # （gs_locator.find_ghostscript が sys._MEIPASS/gs/bin/... → PATH → Program Files の順で探す）。
 _vendor_gs = Path('vendor/gs')
@@ -48,23 +48,32 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# フォルダ形式（onedir）で作る。onefile は起動のたびに全体（Ghostscript 含め数百MB）を
+# 一時フォルダへ展開し、Defender の検査も毎回走って起動が遅かったため。
+# 出力: dist/PDFユーティリティ/{PDFユーティリティ.exe, _internal/}
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='PDFユーティリティ',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='PDFユーティリティ',
 )

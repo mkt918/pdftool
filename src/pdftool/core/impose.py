@@ -26,6 +26,7 @@ from pdftool.core.pageops import (
     check_dest,
     prepare_pages,
 )
+from pdftool.core.redact import Rect
 from pdftool.core.stamp import TextStamp
 from pdftool.utils import naming
 
@@ -116,6 +117,7 @@ def impose_pages(
     passwords: dict[Path, str] | None = None,
     *,
     stamps: Sequence[TextStamp] | None = None,
+    redactions: dict[int, Sequence[Rect]] | None = None,
     progress: Callable[[WriteProgress], None] | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> Path:
@@ -133,7 +135,8 @@ def impose_pages(
     boxes: list[tuple[float, float, float, float]] = []
     n_sheets = -(-total // spec.per_sheet)
 
-    for i, page in enumerate(prepare_pages(pages, scratch, passwords, upright=True, stamps=stamps, cancel=cancel)):
+    for i, page in enumerate(prepare_pages(pages, scratch, passwords, upright=True, stamps=stamps,
+                                              redactions=redactions, cancel=cancel)):
         slot = i % spec.per_sheet
         if slot == 0:
             sheet = out.add_blank_page(width=sw, height=sh)

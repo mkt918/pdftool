@@ -4,13 +4,13 @@
   1. src/pdftool/__init__.py の __version__ を書き換える
   2. テスト → exe ビルド（pdftool.spec）
   3. コミット・タグ・push
-  4. dist の exe を PDFUtility.exe という名前で Release に添付
+  4. dist のアプリのフォルダを PDFUtility.zip にまとめて Release に添付
 """
 
 from __future__ import annotations
 
 import re
-import shutil
+import zipfile
 import subprocess
 import sys
 from pathlib import Path
@@ -18,12 +18,24 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 INIT = ROOT / "src" / "pdftool" / "__init__.py"
 PY = ROOT / ".venv" / "Scripts" / "python.exe"
-ASSET = "PDFUtility.exe"
+ASSET = "PDFUtility.zip"
+APP_DIR = ROOT / "dist" / "PDFユーティリティ"     # pdftool.spec の COLLECT の出力
 
 
 def run(*cmd: str) -> None:
     print(">", " ".join(cmd))
     subprocess.run(cmd, cwd=ROOT, check=True)
+
+
+def make_zip(app_dir: Path, dest: Path) -> None:
+    """アプリのフォルダを、フォルダ名ごと zip にする（展開するとそのまま使えるように）。"""
+    if not (app_dir / "_internal").is_dir():
+        raise SystemExit(f"ビルド結果が見つかりません: {app_dir}")
+    dest.unlink(missing_ok=True)
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        for f in sorted(app_dir.rglob("*")):
+            if f.is_file():
+                z.write(f, Path(app_dir.name) / f.relative_to(app_dir))
 
 
 def main() -> int:
@@ -38,11 +50,8 @@ def main() -> int:
     run(str(PY), "scripts/bundle_ghostscript.py")
     run(str(ROOT / ".venv" / "Scripts" / "pyinstaller.exe"), "--noconfirm", "pdftool.spec")
     asset = ROOT / "dist" / ASSET
-    # 今ビルドした exe（ASSET 以外で最も新しいもの）を毎回コピーする。
-    # 以前は dist の最初の *.exe を拾っていて、前回の ASSET を再アップロードしてしまった。
-    built = max((p for p in (ROOT / "dist").glob("*.exe") if p != asset), key=lambda p: p.stat().st_mtime)
-    shutil.copy2(built, asset)
-    print(f"添付する exe: {built.name} ({asset.stat().st_size:,} バイト)")
+    make_zip(APP_DIR, asset)
+    print(f"添付する zip: {asset.name} ({asset.stat().st_size:,} バイト)")
     run("git", "add", "-A")
     run("git", "commit", "-m", f"v{ver}")
     run("git", "tag", f"v{ver}")
