@@ -144,18 +144,18 @@ class ExportPanel(PanelBase):
             self.quality_spin.setEnabled(self.fmt_combo.currentData() == "jpg")
             self.spec_edit.setEnabled(self.range_combo.currentData() == "spec")
 
-    def _selected_refs(self):
+    def _selected_rows(self) -> list[int]:
+        """書き出す行（0 始まり。画面上の並び）。ファイル名の番号にも使う。"""
         pl = self.window_.page_list
         mode = self.range_combo.currentData()
         if mode == "all":
-            return list(pl.pages)
+            return list(range(len(pl)))
         if mode == "selected":
             rows = self.window_.view.selected_rows()
             if not rows:
                 raise ValueError("ページが選択されていません")
-            return [pl[r] for r in rows]
-        rows = parse_page_spec(self.spec_edit.text(), len(pl))
-        return [pl[r] for r in rows]
+            return rows
+        return parse_page_spec(self.spec_edit.text(), len(pl))
 
     # -- 実行 -------------------------------------------------------------
     def _run(self) -> None:
@@ -163,10 +163,11 @@ class ExportPanel(PanelBase):
         if pl is None:
             return
         try:
-            refs = self._selected_refs()
+            rows = self._selected_rows()
         except ValueError as e:
             self.window_.show_error(str(e))
             return
+        refs = [pl[r] for r in rows]
 
         options = ExportOptions(
             dpi=self.dpi_spin.value(),
@@ -187,7 +188,7 @@ class ExportPanel(PanelBase):
 
         self._worker = self.window_.run_worker(
             export_refs, refs, base,
-            options=options, passwords=passwords,
+            options=options, passwords=passwords, page_numbers=[r + 1 for r in rows],
             on_finished=self._on_finished, on_error=self._on_error,
             on_progress=self._on_progress, on_cancelled=self._on_cancelled,
         )

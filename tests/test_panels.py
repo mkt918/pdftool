@@ -166,7 +166,10 @@ def test_export_panel_spec_mode(win: MainWindow, tmp_path: Path):
     panel.spec_edit.setText("1,3-4")
     panel.run_btn.click()
     assert wait_until(lambda: "完了" in panel.status_label.text())
-    assert len(list(panel._last_output_dir.glob("*.png"))) == 3
+    # ファイル名は画面上のページ番号（1,2,3 の連番ではない）
+    assert sorted(f.name for f in panel._last_output_dir.glob("*.png")) == [
+        "範囲 書出_p001.png", "範囲 書出_p003.png", "範囲 書出_p004.png",
+    ]
 
 
 # ---------------------------------------------------------------------------

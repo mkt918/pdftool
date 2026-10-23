@@ -129,16 +129,21 @@ def export_refs(
     options: ExportOptions = ExportOptions(),
     out_dir: Path | None = None,
     passwords: dict[Path, str] | None = None,
+    page_numbers: Sequence[int] | None = None,
     progress: ProgressCallback | None = None,
     cancel: CancelCheck | None = None,
 ) -> ExportResult:
     """編集中の PageList（PageRef の列）から画像を書き出す。
 
-    回転(ref.rotation)を反映して描画する。ファイル名の連番は refs の並び順で 1..n。
-    複数の元 PDF が混在していても良い（結合後の書き出しに対応）。
+    回転(ref.rotation)を反映して描画する。複数の元 PDF が混在していても良い（結合後の書き出しに対応）。
+    ファイル名の番号は page_numbers（1 始まり。画面上の何ページ目か）を使う。
+    例: 5, 8 ページ目だけ書き出すと _p005, _p008。省略時は refs の並び順で 1..n。
     """
     if not refs:
         raise ValueError("書き出すページがありません")
+    numbers = list(page_numbers) if page_numbers is not None else list(range(1, len(refs) + 1))
+    if len(numbers) != len(refs):
+        raise ValueError("page_numbers の数がページ数と合いません")
     base = Path(base)
     passwords = passwords or {}
     folder = naming.output_dir(base, options.fmt, out_dir, reuse_existing=True)
@@ -153,7 +158,7 @@ def export_refs(
                 doc = PdfDocument(ref.source_path, password=passwords.get(ref.source_path))
                 docs[ref.source_path] = doc
             img = doc.render_page(ref.source_index, dpi=options.dpi, rotation=ref.rotation, crop=ref.crop)
-            dest = naming.unique_path(folder / naming.numbered_name(base, i, options.ext))   # 同じフォルダに既にあれば _2…
+            dest = naming.unique_path(folder / naming.numbered_name(base, numbers[i - 1], options.ext))   # 同じフォルダに既にあれば _2…
             _save_image(img, dest, options)
             files.append(dest)
             if progress:
