@@ -3,6 +3,10 @@
 - 「見開き」: 本のように 2 ページを並べる（「1ページずらす」で組み合わせを変えられる。オンだと 1 ページ目だけ右側に出る）
 - 「1ページ」: 1 ページずつ表示
 - ←/→、PageUp/PageDown、Home/End、＜ ＞ ボタンでめくる
+- 書き込み: ペン・蛍光ペン・消しゴム（ui/ink_tools.py）。書き込みはページの上の別レイヤーで、
+  「書き込み: 表示中／非表示」（L）で一瞬で切り替えられる。線は PageRef ごとに持ち（回転・トリミングで
+  ページの見た目が変わると別ページ扱い＝その書き込みは出ない）、保存は「仕上げ」タブが担当する。
+  ドラッグの終わりで動かさず押し続けると、始点からの直線になる
 
 画像は `request(ref, on_ready)` で別スレッドから取り寄せる（回転・トリミング反映済み）。
 一度見たページは覚えておき、次の見開きは先読みする。
@@ -13,8 +17,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Callable, Sequence
 
-from PySide6.QtCore import QRect, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QKeyEvent, QPainter, QPen
+from PySide6.QtCore import QPointF, QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,20 +29,37 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from pdftool.core.ink import Stroke, distance_to_stroke
 from pdftool.core.pageops import PageRef
+from pdftool.ui.ink_tools import ERASER, HOLD_MS, NONE, InkState, InkToolBar, paint_stroke
 
 RequestFn = Callable[[PageRef, Callable[[QImage], None]], None]
 CACHE_LIMIT = 16
 
 
 class _PageView(QWidget):
-    """1 ページ分の描画領域。領域に収まる最大サイズで縦横比を保って描く。align で綴じ目側に寄せる。"""
+    """1 ページ分の描画領域。領域に収まる最大サイズで縦横比を保って描く。align で綴じ目側に寄せる。
 
-    def __init__(self, align: Qt.AlignmentFlag, parent: QWidget | None = None):
+    書き込みツールが選ばれているときは、ここでマウスの動きを線にする（座標はページに対する割合）。
+    """
+
+    stroke_done = Signal(object, object)       # (このビュー, Stroke)
+    erased = Signal(object, int)               # (このビュー, 消した線の番号)
+
+    def __init__(self, align: Qt.AlignmentFlag, ink: InkState, parent: QWidget | None = None):
         super().__init__(parent)
         self._align = align
+        self._ink = ink
+        self.ref: PageRef | None = None
+        self.strokes: list[Stroke] = []
         self._image: QImage | None = None
         self._empty = True       # True: 何も表示しない（見開きの空き側）
+        self._points: list[tuple[float, float]] | None = None      # 描いている途中の線
+        self._straight = False
+        self._hold = QTimer(self)
+        self._hold.setSingleShot(True)
+        self._hold.setInterval(HOLD_MS)
+        self._hold.timeout.connect(self._on_hold)
         self.setMinimumSize(80, 80)
 
     def show_image(self, image: QImage | None, empty: bool = False) -> None:
@@ -46,16 +67,18 @@ class _PageView(QWidget):
         self._empty = empty
         self.update()
 
-    def paintEvent(self, _e) -> None:
-        if self._empty:
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    def set_page(self, ref: PageRef | None, strokes: list[Stroke]) -> None:
+        if ref != self.ref:
+            self._cancel_stroke()
+        self.ref = ref
+        self.strokes = strokes
+        self.update()
+
+    def image_rect(self) -> QRect | None:
+        """ページ画像を表示している範囲。画像が無ければ None。"""
+        if self._empty or self._image is None or self._image.isNull():
+            return None
         area = self.rect().adjusted(6, 6, -6, -6)
-        if self._image is None or self._image.isNull():
-            p.setPen(QColor(150, 150, 150))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "読み込み中…")
-            return
         size = self._image.size().scaled(area.size(), Qt.AspectRatioMode.KeepAspectRatio)
         if self._align & Qt.AlignmentFlag.AlignRight:
             x = area.right() - size.width() + 1
@@ -63,19 +86,128 @@ class _PageView(QWidget):
             x = area.left()
         else:
             x = area.left() + (area.width() - size.width()) // 2
-        rect = QRect(x, area.top() + (area.height() - size.height()) // 2, size.width(), size.height())
+        return QRect(x, area.top() + (area.height() - size.height()) // 2, size.width(), size.height())
+
+    def paintEvent(self, _e) -> None:
+        if self._empty:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        rect = self.image_rect()
+        if rect is None:
+            p.setPen(QColor(150, 150, 150))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "読み込み中…")
+            return
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(255, 255, 255))
         p.drawRect(rect)
         p.drawImage(rect, self._image)
+        if self._ink.visible:                       # 書き込みレイヤー（非表示にしても内容は残る）
+            p.setClipRect(rect)
+            for st in self.strokes:
+                paint_stroke(p, st, rect)
+            if self._points:
+                paint_stroke(p, self._ink.new_stroke(self._points), rect)
+            p.setClipping(False)
         p.setPen(QPen(QColor(205, 208, 214)))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRect(rect.adjusted(0, 0, -1, -1))
+
+    # -- 書き込み ---------------------------------------------------------------
+    def update_cursor(self) -> None:
+        tool = self._ink.tool
+        self.setCursor(
+            Qt.CursorShape.ArrowCursor if tool == NONE
+            else Qt.CursorShape.PointingHandCursor if tool == ERASER
+            else Qt.CursorShape.CrossCursor
+        )
+
+    def _frac(self, pos: QPointF, clamp: bool = True) -> tuple[float, float] | None:
+        rect = self.image_rect()
+        if rect is None or rect.width() <= 0 or rect.height() <= 0:
+            return None
+        x, y = (pos.x() - rect.x()) / rect.width(), (pos.y() - rect.y()) / rect.height()
+        if clamp:
+            x, y = min(1.0, max(0.0, x)), min(1.0, max(0.0, y))
+        return x, y
+
+    def _cancel_stroke(self) -> None:
+        self._hold.stop()
+        self._points = None
+        self._straight = False
+
+    def _on_hold(self) -> None:
+        """動かさず押し続けた → 始点から今の点までの直線にする。"""
+        if self._points and len(self._points) > 1 and not self._straight:
+            self._straight = True
+            self._points = [self._points[0], self._points[-1]]
+            self.update()
+
+    def _erase_at(self, pos: QPointF) -> None:
+        f, rect = self._frac(pos, clamp=False), self.image_rect()
+        if f is None or rect is None or not (0 <= f[0] <= 1 and 0 <= f[1] <= 1):
+            return
+        aspect = rect.height() / rect.width()
+        reach = max(0.012, 0.5 * max((s.width for s in self.strokes), default=0.0))     # 指す先の太さ程度は当たりにする
+        for k in range(len(self.strokes) - 1, -1, -1):                                  # 上に描いた線から
+            st = self.strokes[k]
+            if distance_to_stroke(st, f[0], f[1], aspect) <= max(reach, st.width / 2 + 0.006):
+                self.erased.emit(self, k)
+                return
+
+    def mousePressEvent(self, e: QMouseEvent) -> None:
+        tool = self._ink.tool
+        if tool == NONE or e.button() != Qt.MouseButton.LeftButton or self.image_rect() is None:
+            e.ignore()
+            return
+        f = self._frac(e.position(), clamp=False)
+        if f is None or not (0 <= f[0] <= 1 and 0 <= f[1] <= 1):
+            return                                     # ページの外では始めない
+        if tool == ERASER:
+            self._erase_at(e.position())
+            return
+        self._points = [f]
+        self._straight = False
+        self._hold.start()
+        self.update()
+
+    def mouseMoveEvent(self, e: QMouseEvent) -> None:
+        if self._ink.tool == ERASER and e.buttons() & Qt.MouseButton.LeftButton:
+            self._erase_at(e.position())
+            return
+        if self._points is None:
+            e.ignore()
+            return
+        f = self._frac(e.position())
+        if f is None:
+            return
+        if self._straight:
+            self._points[1] = f                        # 直線モード: 終点だけ動かす
+            self._hold.stop()
+        else:
+            last = self._points[-1]
+            if (f[0] - last[0]) ** 2 + (f[1] - last[1]) ** 2 < 2.5e-7:
+                return                                 # ほぼ動いていない（長押し判定はそのまま続ける）
+            self._points.append(f)
+            self._hold.start()                         # 動くたびに長押しの計測をやり直す
+        self.update()
+
+    def mouseReleaseEvent(self, e: QMouseEvent) -> None:
+        if self._points is None or e.button() != Qt.MouseButton.LeftButton:
+            e.ignore()
+            return
+        points, self._points = self._points, None
+        self._hold.stop()
+        self._straight = False
+        self.stroke_done.emit(self, self._ink.new_stroke(points))
+        self.update()
 
 
 class ViewerWidget(QWidget):
     row_changed = Signal(list)     # 表示中のページ（0 始まり）。サムネイル側の選択と同期するため
     exit_requested = Signal()
+    ink_changed = Signal()         # 書き込みが増えた・減った
+    save_ink_requested = Signal()
 
     def __init__(self, request: RequestFn, parent: QWidget | None = None):
         super().__init__(parent)
@@ -84,6 +216,10 @@ class ViewerWidget(QWidget):
         self._row = 0
         self._cache: OrderedDict[PageRef, QImage] = OrderedDict()
         self._pending: set[PageRef] = set()
+        self._ink = InkState()
+        self._strokes: dict[PageRef, list[Stroke]] = {}    # 書き込みレイヤー（ページごとの線。消しても履歴で戻せる）
+        self._history: list[tuple] = []                    # ("add"|"erase"|"clear", ref, ...) 1 つ戻す用
+        self.ink_dirty = False                             # 保存していない書き込みがある
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         lay = QVBoxLayout(self)
@@ -120,8 +256,19 @@ class ViewerWidget(QWidget):
         bl.addWidget(self.next_btn)
         lay.addWidget(bar)
 
-        self.left = _PageView(Qt.AlignmentFlag.AlignRight)
-        self.right = _PageView(Qt.AlignmentFlag.AlignLeft)
+        self.ink_bar = InkToolBar(self._ink)
+        self.ink_bar.tool_changed.connect(self._on_tool_changed)
+        self.ink_bar.visible_toggled.connect(lambda _on: self._refresh_ink_views())
+        self.ink_bar.undo_clicked.connect(self.undo_ink)
+        self.ink_bar.clear_page_clicked.connect(self.clear_page_ink)
+        self.ink_bar.save_clicked.connect(self.save_ink_requested)
+        lay.addWidget(self.ink_bar)
+
+        self.left = _PageView(Qt.AlignmentFlag.AlignRight, self._ink)
+        self.right = _PageView(Qt.AlignmentFlag.AlignLeft, self._ink)
+        for v in (self.left, self.right):
+            v.stroke_done.connect(self._on_stroke_done)
+            v.erased.connect(self._on_erased)
         stage = QWidget()
         stage.setStyleSheet("background: #e5e7eb;")
         sl = QHBoxLayout(stage)
@@ -141,6 +288,102 @@ class ViewerWidget(QWidget):
     def _on_mode_changed(self) -> None:
         self.cover_check.setEnabled(self.spread)      # 1 ページ表示では意味がないので無効化
         self._render()
+
+    # -- 書き込みレイヤー -------------------------------------------------------------
+    @property
+    def tool(self) -> str:
+        return self._ink.tool
+
+    def set_tool(self, tool: str) -> None:
+        self.ink_bar.set_tool(tool)
+
+    @property
+    def ink_visible(self) -> bool:
+        return self._ink.visible
+
+    def set_ink_visible(self, on: bool) -> None:
+        self.ink_bar.set_layer_visible(on)
+
+    def ink_marks(self) -> dict[PageRef, tuple[Stroke, ...]]:
+        """線のあるページだけ {PageRef: 線の列}。保存（仕上げタブ）が読む。"""
+        return {r: tuple(v) for r, v in self._strokes.items() if v}
+
+    def ink_count(self) -> int:
+        return sum(len(v) for v in self._strokes.values())
+
+    def mark_ink_saved(self) -> None:
+        self.ink_dirty = False
+
+    def clear_ink(self) -> None:
+        """別の文書を開いたときなど、書き込みをすべて捨てる。"""
+        self._strokes.clear()
+        self._history.clear()
+        self.ink_dirty = False
+        self._refresh_ink_views()
+        self.ink_changed.emit()
+
+    def _current_refs(self) -> list[PageRef]:
+        return [v.ref for v in (self.left, self.right) if v.ref is not None and v.isVisible()]
+
+    def _on_tool_changed(self, _tool: str) -> None:
+        for v in (self.left, self.right):
+            v.update_cursor()
+        self._refresh_ink_views()
+
+    def _refresh_ink_views(self) -> None:
+        for v in (self.left, self.right):
+            v.set_page(v.ref, self._strokes.setdefault(v.ref, []) if v.ref is not None else [])
+        here = sum(len(v.strokes) for v in (self.left, self.right) if v.isVisible())
+        self.ink_bar.set_counts(here, self.ink_count())
+
+    def _changed(self) -> None:
+        self.ink_dirty = True
+        self._refresh_ink_views()
+        self.ink_changed.emit()
+
+    def _on_stroke_done(self, view: _PageView, stroke: Stroke) -> None:
+        if view.ref is None:
+            return
+        self._strokes.setdefault(view.ref, []).append(stroke)
+        self._history.append(("add", view.ref, stroke))
+        self._changed()
+
+    def _on_erased(self, view: _PageView, index: int) -> None:
+        if view.ref is None or not 0 <= index < len(view.strokes):
+            return
+        stroke = self._strokes[view.ref].pop(index)
+        self._history.append(("erase", view.ref, stroke, index))
+        self._changed()
+
+    def undo_ink(self) -> bool:
+        """直前の書き込み（線を足した・消した・ページを消去した）を取り消す。"""
+        if not self._history:
+            return False
+        op, ref, *rest = self._history.pop()
+        lst = self._strokes.setdefault(ref, [])
+        if op == "add":
+            if rest[0] in lst:
+                lst.remove(rest[0])
+        elif op == "erase":
+            lst.insert(min(rest[1], len(lst)), rest[0])
+        else:                                          # "clear"
+            lst[:] = rest[0]
+        if ref in self._refs and ref not in self._current_refs():
+            self.go(self._refs.index(ref))             # 取り消した線のあるページへ移る
+        self._changed()
+        return True
+
+    def clear_page_ink(self) -> None:
+        """今見ているページの書き込みをすべて消す（「1つ戻す」で復活できる）。"""
+        did = False
+        for ref in self._current_refs():
+            lst = self._strokes.get(ref)
+            if lst:
+                self._history.append(("clear", ref, list(lst)))
+                lst.clear()
+                did = True
+        if did:
+            self._changed()
 
     # -- 状態 -----------------------------------------------------------------
     @property
@@ -220,7 +463,12 @@ class ViewerWidget(QWidget):
         elif k == Qt.Key.Key_End:
             self.go(len(self._refs) - 1)
         elif k == Qt.Key.Key_Escape:
-            self.exit_requested.emit()
+            if self._ink.tool != NONE:
+                self.set_tool(NONE)                    # 書き込み中の Esc は、まず閲覧に戻る
+            else:
+                self.exit_requested.emit()
+        elif e.modifiers() == Qt.KeyboardModifier.NoModifier and k in _INK_KEYS:
+            _INK_KEYS[k](self)
         else:
             super().keyPressEvent(e)
 
@@ -274,3 +522,17 @@ class ViewerWidget(QWidget):
             self.right._align = Qt.AlignmentFlag.AlignHCenter
             self.left.setVisible(False)
         self.right.show_image(self._ensure(right), empty=right is None)
+        for view, row in ((self.left, left), (self.right, right)):
+            ref = self._refs[row] if row is not None else None
+            view.set_page(ref, self._strokes.setdefault(ref, []) if ref is not None else [])
+        here = sum(len(v.strokes) for v in (self.left, self.right) if v.isVisible())
+        self.ink_bar.set_counts(here, self.ink_count())
+
+
+_INK_KEYS = {
+    Qt.Key.Key_P: lambda w: w.set_tool("pen"),
+    Qt.Key.Key_M: lambda w: w.set_tool("marker"),
+    Qt.Key.Key_E: lambda w: w.set_tool(ERASER),
+    Qt.Key.Key_L: lambda w: w.set_ink_visible(not w.ink_visible),
+    Qt.Key.Key_U: lambda w: w.undo_ink(),
+}

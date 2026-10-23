@@ -33,6 +33,9 @@ class PanelBase(QWidget):
     def on_selection_changed(self, rows: list[int]) -> None:
         """サムネイルの選択が変わったとき。"""
 
+    def on_ink_changed(self) -> None:
+        """ビューアの書き込み（ペン・蛍光ペン）が増減したとき。"""
+
 
 class PlaceholderPanel(PanelBase):
     """Phase 4 で本実装に置き換えるまでの仮パネル。"""

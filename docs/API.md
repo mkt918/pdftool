@@ -680,3 +680,21 @@ add_image_page(writer, img, dpi=200) -> PageObject
 UI: `ui/redact_dialog.py`（RedactCanvas / RedactDialog）。FinishPanel が `{PageRef: (Rect, ...)}` で指定を持ち、
 保存時に `redaction_indices(refs, marks)` で番号へ直す。回転・トリミングで PageRef が変わると指定は外れる
 （ずれた位置を塗らないため。パネルに「外れた指定」の件数を出す）。出力名は墨消しだけなら `_redacted.pdf`。
+
+### 手書きの書き込み（core/ink.py、ui/ink_tools.py、ui/viewer.py）
+
+```python
+@dataclass(frozen=True) class Stroke: kind("pen"|"marker"), color(r,g,b), width(ページ幅に対する割合), points((x,y)…)  # 座標は 0〜1・左上原点
+distance_to_stroke(stroke, x, y, aspect=1.0) -> float          # 消しゴムの当たり判定
+draw_strokes(writer, page, strokes) -> None                     # ベクターで重ねる。蛍光ペンは /BM /Multiply
+```
+
+`prepare_pages` / `write_pages` / `impose_pages` に `inks: dict[int, Sequence[Stroke]]`（出力の何ページ目か）を追加。
+書き込みはスタンプ・墨消しの後（一番上）に重ねる。座標は回転・トリミング後の見た目基準（墨消しと同じ）。
+
+UI: `ViewerWidget` が書き込みレイヤー（`{PageRef: [Stroke]}`）を持つ。`ink_marks()` / `ink_count()` / `ink_dirty` /
+`mark_ink_saved()` / `clear_ink()` / `undo_ink()` / `clear_page_ink()` / `set_tool()` / `set_ink_visible()`。
+`_PageView` がマウスを線にする（動きが止まって `HOLD_MS`=550ms で始点→現在点の直線に確定、以降は終点だけ動く）。
+FinishPanel の「書き込みを含める」が `ink_marks()` を読んで保存し、成功したら `mark_ink_saved()`。
+`MainWindow.has_unsaved()`（ページ編集 or 未保存の書き込み）を、文書を開く・更新・終了の確認に使う。
+書き込みは PageRef に紐づくので、回転・トリミングで PageRef が変わると外れる（Undo で戻れば復活）。

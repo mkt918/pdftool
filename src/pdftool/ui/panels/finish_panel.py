@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from pdftool.core.compress import format_size
 from pdftool.core.document import PdfDocument
 from pdftool.core.impose import PAPER_SIZES_MM, PRESETS, ImposeSpec, impose_pages
+from pdftool.core.ink import Stroke
 from pdftool.core.pageops import PageRef, WriteProgress, write_pages
 from pdftool.core.redact import Rect
 from pdftool.core.stamp import (
@@ -72,18 +73,19 @@ def build_output(
     impose: ImposeSpec | None,
     passwords: dict[Path, str] | None = None,
     redactions: dict[int, Sequence[Rect]] | None = None,
+    inks: dict[int, Sequence[Stroke]] | None = None,
     progress=None,
     cancel=None,
 ) -> Path:
     if impose is not None:
         return impose_pages(refs, dest, impose, passwords, stamps=stamps or None, redactions=redactions or None,
-                            progress=progress, cancel=cancel)
+                            inks=inks or None, progress=progress, cancel=cancel)
     return write_pages(refs, dest, passwords, stamps=stamps or None, redactions=redactions or None,
-                       progress=progress, cancel=cancel)
+                       inks=inks or None, progress=progress, cancel=cancel)
 
 
-def redaction_indices(refs: Sequence[PageRef], marks: dict[PageRef, Sequence[Rect]]) -> dict[int, Sequence[Rect]]:
-    """PageRef ごとの指定を、refs の何番目かへ直す。"""
+def marks_by_index(refs: Sequence[PageRef], marks: dict) -> dict:
+    """PageRef ごとの指定（墨消しの範囲・書き込みの線）を、refs の何番目かへ直す。"""
     return {i: marks[r] for i, r in enumerate(refs) if marks.get(r)}
 
 
@@ -93,22 +95,24 @@ def render_preview(
     impose: ImposeSpec | None,
     passwords: dict[Path, str] | None = None,
     marks: dict[PageRef, Sequence[Rect]] | None = None,
+    inks: dict[PageRef, Sequence[Stroke]] | None = None,
 ):
     """先頭の出力ページ（面付けなら先頭の 1 枚）を作ってレンダリングした QImage を返す。
 
-    スタンプが無く墨消しだけなら、墨消しした最初のページを見せる。
+    スタンプが無く墨消し・書き込みだけなら、その最初のページを見せる。
     """
-    marks = marks or {}
+    marks, inks = marks or {}, inks or {}
     skip = min((s.skip_first for s in stamps), default=0)
-    if not stamps and marks:
-        skip = next((i for i, r in enumerate(refs) if marks.get(r)), 0)
+    if not stamps and (marks or inks):
+        skip = next((i for i, r in enumerate(refs) if marks.get(r) or inks.get(r)), 0)
     per = impose.per_sheet if impose else 1
     if impose:
         skip -= skip % per                  # 面付けは用紙の区切りから
     sample = list(refs[skip: skip + per]) or list(refs[:per])
     shifted = [replace(s, skip_first=max(0, s.skip_first - skip)) for s in stamps]
     tmp = tempfiles.new_subdir() / "preview.pdf"
-    out = build_output(sample, tmp, shifted, impose, passwords, redaction_indices(sample, marks))
+    out = build_output(sample, tmp, shifted, impose, passwords,
+                       marks_by_index(sample, marks), marks_by_index(sample, inks))
     with PdfDocument(out) as doc:
         return pil_to_qimage(doc.render_page(0, dpi=90))
 
@@ -120,6 +124,7 @@ class FinishPanel(PanelBase):
         super().__init__(window, parent)
         self._worker = None
         self._last_output: Path | None = None
+        self._saving_inks = False
         self._marks: dict[PageRef, tuple[Rect, ...]] = {}
 
         outer = QVBoxLayout(self)
@@ -146,6 +151,7 @@ class FinishPanel(PanelBase):
         lay.addWidget(self._build_watermark())
         lay.addWidget(self._build_label())
         lay.addWidget(self._build_redact())
+        lay.addWidget(self._build_ink())
         lay.addWidget(self._build_impose())
 
         btns = QHBoxLayout()
@@ -283,6 +289,18 @@ class FinishPanel(PanelBase):
         v.addWidget(self.rd_label)
         return self.rd_box
 
+    def _build_ink(self) -> QGroupBox:
+        self.ink_box = self._checkable_box("書き込み（ペン・蛍光ペン）を含める", False)
+        v = QVBoxLayout(self.ink_box)
+        note = QLabel("ビューアで書き込んだ線を、ベクターのまま PDF に重ねます。下の文字は残ります"
+                      "（蛍光ペンは文字が読めるように乗算で重ねます）。")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-weight: normal;")
+        v.addWidget(note)
+        self.ink_label = QLabel()
+        v.addWidget(self.ink_label)
+        return self.ink_box
+
     def _build_impose(self) -> QGroupBox:
         self.im_box = self._checkable_box("面付け（1枚の用紙に複数ページ）", False)
         f = QFormLayout(self.im_box)
@@ -349,14 +367,32 @@ class FinishPanel(PanelBase):
             raise ValueError("墨消しの範囲が指定されていません（「範囲を指定…」から囲んでください）")
         return marks
 
+    def _current_inks(self) -> dict[PageRef, tuple[Stroke, ...]]:
+        """ビューアの書き込みのうち、今のページにまだあるもの（回転・トリミングで別ページになったものは除く）。"""
+        pl = self.window_.page_list
+        live = set(pl.pages) if pl else set()
+        viewer = getattr(self.window_, "viewer", None)          # パネルはビューアより先に作られる
+        return {r: v for r, v in viewer.ink_marks().items() if r in live} if viewer else {}
+
+    def _collect_inks(self) -> dict[PageRef, tuple[Stroke, ...]]:
+        if not self.ink_box.isChecked():
+            return {}
+        inks = self._current_inks()
+        if not inks:
+            raise ValueError("書き込みがありません（ビューアでペン・蛍光ペンを使って書き込んでください）")
+        return inks
+
     def _settings(self):
-        """(stamps, impose, marks)。何も選ばれていない・値が不正なら ValueError。"""
+        """(stamps, impose, marks, inks)。何も選ばれていない・値が不正なら ValueError。"""
         stamps = self._collect_stamps()
         impose = self._collect_impose()
         marks = self._collect_marks()
-        if not stamps and impose is None and not marks:
-            raise ValueError("ページ番号・透かし・ラベル・墨消し・面付けのうち、どれかにチェックを入れてください")
-        return stamps, impose, marks
+        inks = self._collect_inks()
+        if not stamps and impose is None and not marks and not inks:
+            raise ValueError(
+                "ページ番号・透かし・ラベル・墨消し・書き込み・面付けのうち、どれかにチェックを入れてください"
+            )
+        return stamps, impose, marks, inks
 
     def _edit_redactions(self) -> None:
         pl = self.window_.page_list
@@ -375,6 +411,9 @@ class FinishPanel(PanelBase):
     def on_document_changed(self) -> None:
         self._update_state()
 
+    def on_ink_changed(self) -> None:
+        self._update_state()
+
     def _update_state(self) -> None:
         pl = self.window_.page_list
         has = bool(pl) and len(pl) > 0
@@ -390,9 +429,17 @@ class FinishPanel(PanelBase):
         if lost:
             text += f"（回転・トリミング・削除で外れた指定が {lost} ページ分あります）"
         self.rd_label.setText(text)
+        inks = self._current_inks()
+        viewer = getattr(self.window_, "viewer", None)
+        total = viewer.ink_count() if viewer else 0
+        used = sum(len(v) for v in inks.values())
+        itext = (f"{len(inks)} ページ・{used} 本の線を書き込み済み" if inks else "書き込みはありません")
+        if total > used:
+            itext += f"（回転・トリミング・削除で外れた書き込みが {total - used} 本あります）"
+        self.ink_label.setText(itext)
 
     def _set_running_ui(self, running: bool) -> None:
-        for box in (self.num_box, self.wm_box, self.lb_box, self.rd_box, self.im_box):
+        for box in (self.num_box, self.wm_box, self.lb_box, self.rd_box, self.ink_box, self.im_box):
             box.setEnabled(not running)
         self.cancel_btn.setEnabled(running)
 
@@ -402,12 +449,15 @@ class FinishPanel(PanelBase):
         if not pl:
             return
         try:
-            stamps, impose, marks = self._settings()
+            stamps, impose, marks, inks = self._settings()
         except ValueError as e:
             self.window_.show_error(str(e))
             return
         refs = list(pl.pages)
-        suffix = impose.label if impose else ("redacted" if marks and not stamps else "stamped")
+        suffix = impose.label if impose else (
+            "stamped" if stamps else "redacted" if marks else "annotated"
+        )
+        self._saving_inks = bool(inks)
         dest = naming.output_file(refs[0].source_path, suffix, ".pdf")
         passwords = self.window_.passwords_dict()
 
@@ -418,7 +468,8 @@ class FinishPanel(PanelBase):
         self.progress.setValue(0)
         self.status_label.setText("仕上げています…")
         self._worker = self.window_.run_worker(
-            build_output, refs, dest, stamps, impose, passwords, redaction_indices(refs, marks),
+            build_output, refs, dest, stamps, impose, passwords,
+            marks_by_index(refs, marks), marks_by_index(refs, inks),
             on_finished=self._on_finished, on_error=self._on_error,
             on_progress=self._on_progress, on_cancelled=self._on_cancelled,
         )
@@ -429,14 +480,14 @@ class FinishPanel(PanelBase):
         if not pl:
             return
         try:
-            stamps, impose, marks = self._settings()
+            stamps, impose, marks, inks = self._settings()
         except ValueError as e:
             self.window_.show_error(str(e))
             return
         refs = list(pl.pages)
         self.status_label.setText("プレビューを作っています…")
         self.window_.run_worker(
-            render_preview, refs, stamps, impose, self.window_.passwords_dict(), marks,
+            render_preview, refs, stamps, impose, self.window_.passwords_dict(), marks, inks,
             on_finished=self._show_preview,
             on_error=lambda msg, _e: self.status_label.setText(f"エラー: {msg}"),
         )
@@ -464,6 +515,9 @@ class FinishPanel(PanelBase):
 
     def _on_finished(self, out: Path) -> None:
         self._reset_running_state()
+        if self._saving_inks:
+            self.window_.viewer.mark_ink_saved()         # 書き込みを保存した（終了時の確認の対象から外す）
+            self._saving_inks = False
         self._last_output = out
         self.open_folder_btn.setVisible(True)
         self.status_label.setText(f"保存しました: {out.name}（{format_size(out.stat().st_size)}）")

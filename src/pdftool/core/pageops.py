@@ -24,6 +24,7 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import RectangleObject
 
 from pdftool.core.pdfpack import repack_in_place
+from pdftool.core.ink import Stroke, draw_strokes
 from pdftool.core.redact import Rect, add_image_page, render_redacted
 from pdftool.core.document import (
     Crop,
@@ -411,6 +412,7 @@ def prepare_pages(
     upright: bool = False,
     stamps: Sequence[TextStamp] | None = None,
     redactions: dict[int, Sequence[Rect]] | None = None,
+    inks: dict[int, Sequence[Stroke]] | None = None,
     progress: Callable[[WriteProgress], None] | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> Iterator:
@@ -422,10 +424,11 @@ def prepare_pages(
     どちらも使わない通常保存では、従来通り /Rotate の加算だけで元ページの構造を壊さない。
     redactions（{ページ番号: 範囲の列}）にあるページは、黒塗りを描き込んだ画像のページに置き換える
     （core/redact.py。見た目どおり・回転 0 で作るので、回転・トリミングの処理は要らない）。
+    inks（{ページ番号: 線の列}）は、ペン・蛍光ペンの書き込みを最後にベクターで重ねる（core/ink.py。スタンプの上）。
     """
     passwords = passwords or {}
     painter = StampPainter(writer) if stamps else None
-    bake = upright or bool(stamps)
+    bake = upright or bool(stamps) or bool(inks)
     readers: dict[Path, PdfReader] = {}
     total = len(pages)
     for i, ref in enumerate(pages):
@@ -437,6 +440,8 @@ def prepare_pages(
             added = add_image_page(writer, img)
             if painter is not None:
                 painter.stamp_page(added, list(stamps), i, total)
+            if inks and inks.get(i):
+                draw_strokes(writer, added, inks[i])
             if progress:
                 progress(WriteProgress(i + 1, total, f"ページを処理しています… {i + 1}/{total}"))
             yield added
@@ -463,6 +468,8 @@ def prepare_pages(
                 added.transfer_rotation_to_content()
         if painter is not None:
             painter.stamp_page(added, list(stamps), i, total)
+        if inks and inks.get(i):
+            draw_strokes(writer, added, inks[i])
         if progress:
             progress(WriteProgress(i + 1, total, f"ページを処理しています… {i + 1}/{total}"))
         yield added
@@ -498,6 +505,7 @@ def write_pages(
     *,
     stamps: Sequence[TextStamp] | None = None,
     redactions: dict[int, Sequence[Rect]] | None = None,
+    inks: dict[int, Sequence[Stroke]] | None = None,
     progress: Callable[[WriteProgress], None] | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> Path:
@@ -507,13 +515,14 @@ def write_pages(
     - dest が既に存在すれば `_2`, `_3` … を付けた別名にする
     - stamps を渡すと、ページ番号・透かし・ラベルを重ねる（core/stamp.py）
     - redactions を渡すと、そのページを墨消しする（core/redact.py）
+    - inks を渡すと、ペン・蛍光ペンの書き込みを重ねる（core/ink.py）
     - 戻り値は実際に書いたパス
     """
     if not pages:
         raise ValueError("書き出すページがありません")
     dest = check_dest(pages, dest)
     writer = PdfWriter()
-    for _ in prepare_pages(pages, writer, passwords, stamps=stamps, redactions=redactions,
+    for _ in prepare_pages(pages, writer, passwords, stamps=stamps, redactions=redactions, inks=inks,
                            progress=progress, cancel=cancel):
         pass
     _atomic_write(writer, dest)

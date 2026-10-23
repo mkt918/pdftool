@@ -103,6 +103,8 @@ class MainWindow(QMainWindow):
         self.viewer = ViewerWidget(self._request_viewer_image)
         self.viewer.row_changed.connect(self._on_viewer_rows)
         self.viewer.exit_requested.connect(lambda: self.act_viewer.setChecked(False))
+        self.viewer.save_ink_requested.connect(self._save_ink)
+        self.viewer.ink_changed.connect(lambda: [p.on_ink_changed() for p in self.panels])
         self.left_stack = QStackedWidget()
         self.left_stack.addWidget(self.view)
         self.left_stack.addWidget(self.viewer)
@@ -224,7 +226,7 @@ class MainWindow(QMainWindow):
         if not updater.is_frozen():
             QMessageBox.information(self, "更新", "開発実行中は自動更新できません（exe 版で使えます）。")
             return
-        if self.page_list is not None and self.page_list.is_modified and not self._confirm_discard():
+        if self.has_unsaved() and not self._confirm_discard():
             return
         if QMessageBox.question(
             self, "更新", f"v{info.version} をダウンロードして再起動します。よろしいですか？",
@@ -355,7 +357,7 @@ class MainWindow(QMainWindow):
 
     def open_pdf(self, path: Path | str) -> bool:
         path = Path(path)
-        if self.page_list is not None and self.page_list.is_modified:
+        if self.has_unsaved():
             if not self._confirm_discard():
                 return False
         pl, password = self._load_with_password(lambda pw: PageList.from_pdf(path, pw), path)
@@ -365,6 +367,7 @@ class MainWindow(QMainWindow):
         if password:
             self.model.set_password(path, password)
         self.model.set_page_list(pl)
+        self.viewer.clear_ink()          # 書き込みは文書ごと。前の文書の線は持ち越さない
         return True
 
     def append_pdf(self, path: Path | str) -> bool:
@@ -457,9 +460,22 @@ class MainWindow(QMainWindow):
         self._on_document_changed()
         self.statusBar().showMessage(f"保存しました: {out.name}（{format_size(out.stat().st_size)}）", 8000)
 
+    def has_unsaved(self) -> bool:
+        """保存していないページ編集か、保存していない書き込み（ペン・蛍光ペン）がある。"""
+        return bool(self.page_list is not None and self.page_list.is_modified) or self.viewer.ink_dirty
+
+    def _save_ink(self) -> None:
+        """ビューアの「書き込みを保存…」: 仕上げタブを開き、書き込みを含める項目をオンにする。"""
+        panel = next((p for p in self.panels if isinstance(p, FinishPanel)), None)
+        if panel is None:
+            return
+        self.act_side.setChecked(True)
+        self.tabs.setCurrentWidget(panel)
+        panel.ink_box.setChecked(True)
+
     def _confirm_discard(self) -> bool:
         r = QMessageBox.question(
-            self, "確認", "保存していない変更があります。破棄しますか？",
+            self, "確認", "保存していない変更（ページの編集・書き込み）があります。破棄しますか？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         return r == QMessageBox.StandardButton.Yes
@@ -654,7 +670,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_force_quit", False):      # 更新による再起動（確認は済み）
             e.accept()
             return
-        if self.page_list is not None and self.page_list.is_modified and not self._confirm_discard():
+        if self.has_unsaved() and not self._confirm_discard():
             e.ignore()
             return
         if self._workers:
