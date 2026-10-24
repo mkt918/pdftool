@@ -238,9 +238,11 @@ def export_refs(
     options: ExportOptions = ExportOptions(),
     out_dir: Path | None = None,
     passwords: dict[Path, str] | None = None,
+    page_numbers: Sequence[int] | None = None,                    # v0.4.0: ファイル名の番号（1 始まり・画面上の何ページ目か）
     progress=None, cancel=None,
 ) -> ExportResult
-    # base は出力フォルダ名・ファイル名の基準（通常は page_list[0].source_path）。連番は並び順 1..n
+    # base は出力フォルダ名・ファイル名の基準（通常は page_list[0].source_path）。
+    # 番号は page_numbers（5, 8 ページ目だけ書き出せば _p005, _p008）。省略時は並び順 1..n。数が refs と違えば ValueError
 ```
 
 - 描画は `PdfDocument.render_page(index, dpi=options.dpi, rotation=...)`。PIL の `save()` で書く
@@ -634,6 +636,16 @@ impose_pages(pages, dest, spec, passwords=None, *, stamps=None, progress=None, c
 
 ## v0.4.0 の追加（2026-10-22）
 
+### 画像書き出しのファイル名（core/export.py）
+
+`export_refs(..., page_numbers=...)` を追加（上の export_refs 参照）。ExportPanel は選択行から
+`page_numbers=[行番号 + 1, ...]` を渡し、`_p001` ではなく画面上の実際のページ番号で保存する。
+
+### スピンボックス・コンボボックスの矢印（ui/theme.py）
+
+Qt のスタイルシートは CSS の border 三角形を描けず灰色の四角になるため、`_make_arrow()` で矢印 PNG を生成し、
+`QSS_TEMPLATE` の `{{ARROW_UP}}` / `{{ARROW_DOWN}}` を `_build_qss()` で `url()` に置き換えて `apply_theme` に渡す。
+
 ### 自動更新（utils/updater.py）— フォルダ形式
 
 ```python
@@ -678,7 +690,7 @@ add_image_page(writer, img, dpi=200) -> PageObject
 上に黒い四角を重ねるだけだと下の文字が残るため。スタンプはその後に重ねる。
 
 UI: `ui/redact_dialog.py`（RedactCanvas / RedactDialog）。FinishPanel が `{PageRef: (Rect, ...)}` で指定を持ち、
-保存時に `redaction_indices(refs, marks)` で番号へ直す。回転・トリミングで PageRef が変わると指定は外れる
+保存時に `marks_by_index(refs, marks)`（墨消し・書き込み共通）で番号へ直す。回転・トリミングで PageRef が変わると指定は外れる
 （ずれた位置を塗らないため。パネルに「外れた指定」の件数を出す）。出力名は墨消しだけなら `_redacted.pdf`。
 
 ### 手書きの書き込み（core/ink.py、ui/ink_tools.py、ui/viewer.py）
