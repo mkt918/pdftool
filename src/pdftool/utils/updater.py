@@ -15,7 +15,6 @@ import os
 import shutil
 import subprocess
 import sys
-import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,8 +57,11 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
-def check_latest(current: str = __version__, *, opener: Callable = urllib.request.urlopen) -> UpdateInfo | None:
+def check_latest(current: str = __version__, *, opener: Callable | None = None) -> UpdateInfo | None:
     """新しい版があれば UpdateInfo、無ければ None。通信失敗は例外を投げる（呼び出し側で握りつぶす）。"""
+    import urllib.request          # 起動を軽くするため、使うときに読み込む（裏のスレッドで呼ばれる）
+
+    opener = opener or urllib.request.urlopen
     req = urllib.request.Request(API_URL, headers={"Accept": "application/vnd.github+json", "User-Agent": "pdftool"})
     with opener(req, timeout=TIMEOUT) as r:
         data = json.load(r)
@@ -77,6 +79,8 @@ def check_latest(current: str = __version__, *, opener: Callable = urllib.reques
 
 def download_update(info: UpdateInfo, dest: Path, progress: Callable[[tuple[int, int]], None] | None = None) -> Path:
     """info の zip を dest へ落とす。サイズ・SHA256 が合わなければ消して例外。"""
+    import urllib.request
+
     req = urllib.request.Request(info.url, headers={"User-Agent": "pdftool"})
     h = hashlib.sha256()
     done = 0

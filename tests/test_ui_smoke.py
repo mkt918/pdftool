@@ -98,7 +98,8 @@ def test_ghostscript_recheck_button(win: MainWindow, monkeypatch):
     win.gs_recheck_btn.click()
     assert win.gs_path == Path("C:/fake/gs.exe")
     assert not win.gs_recheck_btn.isVisible()
-    assert "Ghostscript 10.00.0" in win.lbl_gs.text()
+    assert wait_until(lambda: "Ghostscript 10.00.0" in win.lbl_gs.text())    # 版番号は裏で調べて後から出る
+    assert not win._workers                         # 「実行中の処理」には数えない
 
 
 def test_close_with_running_worker_prompts_and_cancels(win: MainWindow, monkeypatch):

@@ -61,6 +61,7 @@ class _PageView(QWidget):
         self.strokes: list[Stroke] = []
         self._image: QImage | None = None
         self._empty = True       # True: 何も表示しない（見開きの空き側）
+        self._failed = False     # 描画に失敗した
         self._points: list[tuple[float, float]] | None = None      # 描いている途中の線
         self._straight = False
         self._hold = QTimer(self)
@@ -69,9 +70,10 @@ class _PageView(QWidget):
         self._hold.timeout.connect(self._on_hold)
         self.setMinimumSize(80, 80)
 
-    def show_image(self, image: QImage | None, empty: bool = False) -> None:
+    def show_image(self, image: QImage | None, empty: bool = False, failed: bool = False) -> None:
         self._image = image
         self._empty = empty
+        self._failed = failed
         self.update()
 
     def set_page(self, ref: PageRef | None, strokes: list[Stroke]) -> None:
@@ -110,7 +112,8 @@ class _PageView(QWidget):
         rect = self.image_rect()
         if rect is None:
             p.setPen(QColor(150, 150, 150))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "読み込み中…")
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                       "このページは表示できません" if self._failed else "読み込み中…")
             return
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(255, 255, 255))
@@ -419,9 +422,10 @@ class ViewerWidget(QWidget):
         self._refs: list[PageRef] = []
         self._row = 0
         self._cache: OrderedDict[PageRef, QImage] = OrderedDict()
-        self._pending: set[PageRef] = set()
         self._hires: OrderedDict[PageRef, QImage] = OrderedDict()     # 拡大して見るときの高解像度版
-        self._pending_hi: set[PageRef] = set()
+        self._queue: list[tuple[PageRef, int | None]] = []            # 描画待ち (ref, dpi)。dpi None は通常版
+        self._busy: tuple[PageRef, int | None] | None = None          # 描画中の 1 件
+        self._failed: set[tuple[PageRef, int | None]] = set()
         self._ink = InkState()
         self._strokes: dict[PageRef, list[Stroke]] = {}    # 書き込みレイヤー（ページごとの線。消しても履歴で戻せる）
         self._history: list[tuple] = []                    # ("add"|"erase"|"clear", ref, ...) 1 つ戻す用
@@ -722,6 +726,44 @@ class ViewerWidget(QWidget):
             super().keyPressEvent(e)
 
     # -- 画像の取得 ---------------------------------------------------------------
+    # 描画の要求は 1 件ずつ順に出す（pdfium は並列に走らないので、まとめて出すと
+    # すばやくめくったときに通り過ぎたページの描画を待たされる）。めくるたびに待ち行列を作り直し、
+    # 今見ているページ → 高解像度版 → 先読み の順にする。
+    def _want(self, ref: PageRef, dpi: int | None = None) -> None:
+        key = (ref, dpi)
+        if key == self._busy or key in self._queue or key in self._failed:
+            return
+        self._queue.append(key)
+        self._pump()
+
+    def _pump(self) -> None:
+        if self._busy is not None or not self._queue:
+            return
+        key = self._busy = self._queue.pop(0)
+        ref, dpi = key
+        cb = lambda im, k=key: self._on_loaded(k, im)     # noqa: E731
+        if dpi is None:
+            self._request(ref, cb)
+        else:
+            self._request(ref, cb, dpi)
+
+    def _on_loaded(self, key: tuple[PageRef, int | None], image: QImage | None) -> None:
+        if self._busy == key:
+            self._busy = None
+        ref, dpi = key
+        if image is None:
+            self._failed.add(key)                          # 描画できなかった（同じページを何度も試さない）
+            if dpi is None and ref in (self.left.ref, self.right.ref):
+                self._paint_pages()
+        elif ref in self._refs:                            # 読み込み中に消されていなければ覚える
+            cache, limit = (self._cache, CACHE_LIMIT) if dpi is None else (self._hires, HI_LIMIT)
+            cache[ref] = image
+            while len(cache) > limit:
+                cache.popitem(last=False)
+            if ref in (self.left.ref, self.right.ref):
+                self._paint_pages()
+        self._pump()
+
     def _ensure(self, row: int | None) -> QImage | None:
         if row is None or not 0 <= row < len(self._refs):
             return None
@@ -730,19 +772,8 @@ class ViewerWidget(QWidget):
         if img is not None:
             self._cache.move_to_end(ref)
             return img
-        if ref not in self._pending:
-            self._pending.add(ref)
-            self._request(ref, lambda im, r=ref: self._on_ready(r, im))
+        self._want(ref)
         return None
-
-    def _on_ready(self, ref: PageRef, image: QImage) -> None:
-        self._pending.discard(ref)
-        if ref not in self._refs:       # 読み込み中に消された
-            return
-        self._cache[ref] = image
-        while len(self._cache) > CACHE_LIMIT:
-            self._cache.popitem(last=False)
-        self._paint_pages()
 
     def _image_for(self, row: int | None) -> QImage | None:
         """表示に使う画像。拡大中は高解像度版（無ければ取り寄せ、届くまでは通常版）。"""
@@ -754,19 +785,18 @@ class ViewerWidget(QWidget):
         if hi is not None:
             self._hires.move_to_end(ref)
             return hi
-        if ref not in self._pending_hi:
-            self._pending_hi.add(ref)
-            self._request(ref, lambda im, r=ref: self._on_ready_hi(r, im), HI_DPI)
+        self._want(ref, HI_DPI)
         return base
 
-    def _on_ready_hi(self, ref: PageRef, image: QImage) -> None:
-        self._pending_hi.discard(ref)
-        if ref not in self._refs:
-            return
-        self._hires[ref] = image
-        while len(self._hires) > HI_LIMIT:
-            self._hires.popitem(last=False)
-        self._paint_pages()
+    def _has_failed(self, row: int | None) -> bool:
+        return row is not None and 0 <= row < len(self._refs) and (self._refs[row], None) in self._failed
+
+    def _prefetch(self, s: int) -> None:
+        """次の見開き 2 つと前の見開きを、今のページの後で読んでおく。"""
+        for t in (s + 1, s + 2, s - 1):
+            if 0 <= t < self._spread_count():
+                for p in self._pages_of(t):
+                    self._ensure(p)
 
     def _render(self) -> None:
         n = len(self._refs)
@@ -780,9 +810,9 @@ class ViewerWidget(QWidget):
         )
         self.prev_btn.setEnabled(s > 0)
         self.next_btn.setEnabled(s < self._spread_count() - 1)
+        self._queue.clear()                     # 通り過ぎたページの描画待ちは捨てる
         self._paint_pages()
-        for p in self._pages_of(s + 1):         # 次の見開きを先読み
-            self._ensure(p)
+        self._prefetch(s)
         self.row_changed.emit(rows)
 
     def _paint_pages(self) -> None:
@@ -790,11 +820,11 @@ class ViewerWidget(QWidget):
         if self.spread:
             self.right._align = Qt.AlignmentFlag.AlignLeft
             self.left.setVisible(True)
-            self.left.show_image(self._image_for(left), empty=left is None)
+            self.left.show_image(self._image_for(left), empty=left is None, failed=self._has_failed(left))
         else:
             self.right._align = Qt.AlignmentFlag.AlignHCenter
             self.left.setVisible(False)
-        self.right.show_image(self._image_for(right), empty=right is None)
+        self.right.show_image(self._image_for(right), empty=right is None, failed=self._has_failed(right))
         for view, row in ((self.left, left), (self.right, right)):
             ref = self._refs[row] if row is not None else None
             view.set_page(ref, self._strokes.setdefault(ref, []) if ref is not None else [])

@@ -38,7 +38,6 @@ def _build_qss() -> str:
 
 
 QSS_TEMPLATE = f"""
-* {{ font-family: "Yu Gothic UI", "Segoe UI", "Meiryo UI", sans-serif; }}
 QMainWindow, QDialog {{ background: #f3f4f6; }}
 QWidget {{ color: #1f2937; font-size: 13px; }}
 QLabel {{ background: transparent; }}
@@ -162,6 +161,9 @@ QToolTip {{
 def apply_theme(app: QApplication) -> None:
     app.setStyle("Fusion")
     font = app.font()
+    # 書体はアプリのフォントで決める（スタイルシートの「* { font-family }」は全部品で書体を探し直すので、
+    # 起動が 0.1〜0.2 秒遅くなる）。Yu Gothic UI は Windows 10 以降に必ずある
+    font.setFamily("Yu Gothic UI")
     font.setPointSizeF(max(font.pointSizeF(), 9.5))
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(font)

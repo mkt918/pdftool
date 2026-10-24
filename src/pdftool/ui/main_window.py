@@ -79,8 +79,9 @@ class MainWindow(QMainWindow):
         self.settings = QSettings()
 
         # --- Ghostscript 検出（無ければ圧縮だけ無効化） ---
+        # 版番号は表示用だけなので、gs を実際に起動して調べるのは裏で行う（起動を待たせない）
         self.gs_path: Path | None = find_ghostscript()
-        self.gs_version: str | None = ghostscript_version(self.gs_path) if self.gs_path else None
+        self.gs_version: str | None = None
 
         # --- サムネイル基盤 ---
         self.thumb_worker = ThumbnailWorker(self)
@@ -124,8 +125,10 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._workers: list[Worker] = []   # 実行中ワーカーの参照保持（GC 防止）
         self._bg_workers: list[Worker] = []   # ビューアの先読み描画（終了確認の対象外）
+        self._closing = False
         self._on_document_changed()
         self._on_tab_changed(self.tabs.currentIndex())
+        self._fetch_gs_version()
 
     # ------------------------------------------------------------------
     # 構築
@@ -210,7 +213,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def check_for_update(self) -> None:
         """起動時に裏で最新版を確認する。通信できなくても何も出さない。"""
-        self.run_worker(updater.check_latest, on_finished=self._on_update_checked, on_error=lambda *_: None)
+        self.run_worker(updater.check_latest, on_finished=self._on_update_checked, on_error=lambda *_: None,
+                        background=True)
 
     def _on_update_checked(self, info) -> None:
         if info is None:
@@ -265,12 +269,25 @@ class MainWindow(QMainWindow):
             self.lbl_gs.setToolTip("README の手順でインストールしてください（winget または公式インストーラ）")
             self.gs_recheck_btn.setVisible(True)
 
+    def _fetch_gs_version(self) -> None:
+        if not self.gs_path:
+            return
+        path = self.gs_path
+
+        def done(version) -> None:
+            if self.gs_path == path:
+                self.gs_version = version
+                self._update_gs_label()
+
+        self.run_worker(ghostscript_version, path, on_finished=done, on_error=lambda *_: None, background=True)
+
     def _recheck_ghostscript(self) -> None:
         """インストール後に再起動しなくても検出し直せるようにする。"""
         getattr(find_ghostscript, "cache_clear", lambda: None)()
         self.gs_path = find_ghostscript()
-        self.gs_version = ghostscript_version(self.gs_path) if self.gs_path else None
+        self.gs_version = None
         self._update_gs_label()
+        self._fetch_gs_version()
         for p in self.panels:
             p.on_document_changed()
         self.statusBar().showMessage(
@@ -542,14 +559,10 @@ class MainWindow(QMainWindow):
     # ビューアモード / チェックモード
     # ------------------------------------------------------------------
     def _request_viewer_image(self, ref, on_ready, dpi: int = 150) -> None:
-        # 先読みの描画は「実行中の処理」に数えない（閉じるときに確認ダイアログを出さないため）
-        w = self.run_worker(_render_ref_image, ref, self.passwords_dict().get(ref.source_path), dpi,
-                            on_finished=on_ready, on_error=lambda *_: None)
-        if w in self._workers:
-            self._workers.remove(w)
-        self._bg_workers.append(w)       # シグナルの受け手が先に GC されないよう保持
-        w.signals.finished.connect(lambda *_: self._bg_workers.remove(w) if w in self._bg_workers else None)
-        w.signals.error.connect(lambda *_: self._bg_workers.remove(w) if w in self._bg_workers else None)
+        if self._closing:                # 終了処理の後は新しい描画を始めない（終了中の pdfium に触れて落ちるため）
+            return
+        self.run_worker(_render_ref_image, ref, self.passwords_dict().get(ref.source_path), dpi,
+                        on_finished=on_ready, on_error=lambda *_: on_ready(None), background=True)
 
     def _set_viewer_mode(self, on: bool) -> None:
         pl = self.page_list
@@ -591,15 +604,21 @@ class MainWindow(QMainWindow):
         on_error: Callable[[str, object], None] | None = None,
         on_progress: Callable[[object], None] | None = None,
         on_cancelled: Callable[[], None] | None = None,
+        background: bool = False,
         **kwargs,
     ) -> Worker:
-        """fn を別スレッドで実行する。コールバックは主スレッドで呼ばれる。戻り値の Worker.cancel() で中断。"""
+        """fn を別スレッドで実行する。コールバックは主スレッドで呼ばれる。戻り値の Worker.cancel() で中断。
+
+        background=True は裏の軽い処理（先読みの描画・更新の確認など）。「実行中の処理」に数えないので、
+        閉じるときの確認ダイアログを出さない。
+        """
         w = Worker(fn, *args, **kwargs)
-        self._workers.append(w)
+        held = self._bg_workers if background else self._workers
+        held.append(w)                     # シグナルの受け手が先に GC されないよう保持
 
         def _done(*_):
-            if w in self._workers:
-                self._workers.remove(w)
+            if w in held:
+                held.remove(w)
 
         if on_finished:
             w.signals.finished.connect(on_finished)
@@ -668,6 +687,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e: QCloseEvent) -> None:
         if getattr(self, "_force_quit", False):      # 更新による再起動（確認は済み）
+            self._shutdown_threads()
             e.accept()
             return
         if self.has_unsaved() and not self._confirm_discard():
@@ -684,6 +704,13 @@ class MainWindow(QMainWindow):
                 return
             for w in list(self._workers):
                 w.cancel()
+        self._shutdown_threads()
+        super().closeEvent(e)
+
+    def _shutdown_threads(self) -> None:
+        """描画スレッドを止めてから終わる（動いたまま pdfium を片付けると異常終了することがある）。"""
+        self._closing = True
+        for w in list(self._workers) + list(self._bg_workers):
+            w.cancel()
         self.thumb_worker.stop()
         QThreadPool.globalInstance().waitForDone(5000)
-        super().closeEvent(e)

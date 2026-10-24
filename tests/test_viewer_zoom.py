@@ -8,7 +8,7 @@ from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from conftest import make_blank_pdf, wait_until
+from conftest import wait_until
 from test_viewer_ink import _drag, _open_viewer
 
 
@@ -127,7 +127,7 @@ def test_high_resolution_is_requested_when_zoomed(win, tmp_path: Path):
     orig = vw._request
     vw._request = lambda ref, cb, *a: (seen.append(a), orig(ref, cb, *a))[1]
     vw.set_zoom(3)
-    assert seen and seen[0][0] > 150
+    assert wait_until(lambda: any(a and a[0] > 150 for a in seen))     # 描画中の 1 件が終わってから出る
     assert wait_until(lambda: len(vw._hires) == 1)
     vw.set_zoom(1)
 

@@ -372,7 +372,7 @@ class ThumbnailView(QListView):
 
 ```python
 class MainWindow(QMainWindow):
-    gs_path: Path | None; gs_version: str | None
+    gs_path: Path | None; gs_version: str | None     # gs_version は起動後に裏で調べて後から入る（それまで None）
     settings: QSettings          # QSettings()。組織名/アプリ名は __init__ で設定済み
     model: ThumbnailModel; view: ThumbnailView; tabs: QTabWidget; panels: list[PanelBase]
     page_list: PageList | None           # property
@@ -382,13 +382,17 @@ class MainWindow(QMainWindow):
     def show_error(self, message: str, title="エラー")
     def password_for(self, path: Path) -> str | None      # そのファイルを開くのに使ったパスワード
     def passwords_dict(self) -> dict[Path, str]            # export_refs 等に渡す用の一覧
-    def run_worker(self, fn, *args, on_finished=None, on_error=None, on_progress=None, on_cancelled=None, **kwargs) -> Worker
+    def run_worker(self, fn, *args, on_finished=None, on_error=None, on_progress=None, on_cancelled=None,
+                   background=False, **kwargs) -> Worker
+    # background=True: 裏の軽い処理（ビューアの描画・更新確認・gs の版番号）。終了時の「実行中の処理」に数えない
     # ツールバー: act_open / act_append / act_save / act_undo / act_redo / act_rot_l / act_rot_r
     #            / act_delete / act_select_all(Ctrl+A) / size_combo（選択はQSettingsの'thumb_size'に永続化）
     # ステータスバー: lbl_doc / lbl_gs / gs_recheck_btn（Ghostscript未検出時のみ表示。押すとキャッシュを
     #   クリアして再検出し、全パネルの on_document_changed() を呼び直す）
     # 終了時（closeEvent）: 実行中の run_worker ジョブが残っていれば確認ダイアログを出し、
     #   Yesなら全ワーカーに cancel() してから待つ（Noなら閉じない）
+    #   _shutdown_threads(): サムネイルスレッドを止めてスレッドプールを待つ。以後ビューアの描画要求は無視する
+    #   （終了中の pdfium に触れると異常終了するため）。更新による再起動（_force_quit）でも必ず通る
 ```
 
 ### ui/panels/base.py
@@ -721,3 +725,14 @@ FinishPanel の「書き込みを含める」が `ink_marks()` を読んで保�
 拡大していないときの通常ホイールはページめくり。めくると拡大したまま左上から見る。
 `zoom >= HI_ZOOM(2.0)` で見ているページだけ `HI_DPI(300)` で取り寄せ直す（`_hires`、最大 `HI_LIMIT` 枚）。
 そのため `RequestFn` は `(ref, on_ready)` と `(ref, on_ready, dpi)` の両方で呼ばれる。
+
+## 起動と動作の軽量化（2026-10-24）
+
+- 起動（Python 起動〜ウィンドウ表示、手元の中央値）: 1.77 秒 → 0.94 秒
+  - `theme.apply_theme`: 書体はアプリのフォント（`setFamily("Yu Gothic UI")`）で決める。QSS の `* { font-family }` は
+    全部品で書体を探し直すので使わない
+  - Ghostscript の版番号（`gs -v` の起動）は `_fetch_gs_version()` で裏で調べる。検出（パスの探索）だけは起動時に行う
+  - `utils/updater.py` の `urllib` は使う関数の中で import（`check_latest(opener=None)`）
+- ビューアの描画待ち行列（`ViewerWidget._want / _pump / _on_loaded`）: 要求は 1 件ずつ出し、めくるたびに待ち行列を
+  作り直す（今のページ → 高解像度版 → 先読み: 次の見開き 2 つと前の見開き）。すばやく 10 回めくった後の待ち 1.0 秒 → 0.1 秒。
+  描画に失敗したら `on_ready(None)` が呼ばれ、そのページは「このページは表示できません」と出して再試行しない
