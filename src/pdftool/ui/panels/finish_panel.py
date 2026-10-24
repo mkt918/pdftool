@@ -12,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -293,7 +294,9 @@ class FinishPanel(PanelBase):
         self.ink_box = self._checkable_box("書き込み（ペン・蛍光ペン）を含める", False)
         v = QVBoxLayout(self.ink_box)
         note = QLabel("ビューアで書き込んだ線を、ベクターのまま PDF に重ねます。下の文字は残ります"
-                      "（蛍光ペンは文字が読めるように乗算で重ねます）。")
+                      "（蛍光ペンは文字が読めるように乗算で重ねます）。\n"
+                      "保存した PDF では線が内容の一部になり、あとから消しゴムで消せません。原本は変わりません。"
+                      "保存しない書き込みは、文書を閉じると消えます。")
         note.setWordWrap(True)
         note.setStyleSheet("color: #666; font-weight: normal;")
         v.addWidget(note)
@@ -515,12 +518,28 @@ class FinishPanel(PanelBase):
 
     def _on_finished(self, out: Path) -> None:
         self._reset_running_state()
-        if self._saving_inks:
+        saved_inks = self._saving_inks
+        text = f"保存しました: {out.name}（{format_size(out.stat().st_size)}）"
+        if saved_inks:
             self.window_.viewer.mark_ink_saved()         # 書き込みを保存した（終了時の確認の対象から外す）
             self._saving_inks = False
+            text += "\n書き込みを PDF に焼き込みました（この PDF では消せません）。原本は変更していません。"
         self._last_output = out
         self.open_folder_btn.setVisible(True)
-        self.status_label.setText(f"保存しました: {out.name}（{format_size(out.stat().st_size)}）")
+        self.status_label.setText(text)
+        if saved_inks:
+            self._notify_ink_saved(out)
+
+    def _notify_ink_saved(self, out: Path) -> None:
+        """書き込みを保存したことを、見逃さないようにダイアログでも知らせる（操作を止めない）。"""
+        box = QMessageBox(QMessageBox.Icon.Information, "書き込みを保存しました",
+                          f"書き込みを PDF に焼き込んで保存しました。\n\n保存先: {out}\n\n"
+                          "・この PDF では、書き込みを消しゴムで消せません\n"
+                          "・原本の PDF は変更していません\n"
+                          "・ビューアの書き込みはそのまま残っています（保存済みの扱いです）",
+                          QMessageBox.StandardButton.Ok, self.window_)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.open()
 
     def _on_error(self, message: str, exc: object) -> None:
         self._reset_running_state()

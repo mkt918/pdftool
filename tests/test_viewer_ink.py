@@ -213,3 +213,19 @@ def test_unsaved_ink_asks_before_closing_document(win, tmp_path: Path, monkeypat
     _drag(vw.right, [(0.2, 0.2), (0.6, 0.4)])
     assert win.has_unsaved()
     assert win.open_pdf(make_blank_pdf(tmp_path / "x.pdf", pages=1)) is False and asked
+
+
+def test_saving_ink_tells_the_user_clearly(win, tmp_path: Path):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    vw = _open_viewer(win, tmp_path)
+    vw.set_tool("pen")
+    _drag(vw.right, [(0.1, 0.5), (0.9, 0.5)])
+    panel = win.panels[3]
+    panel.ink_box.setChecked(True)
+    assert "消しゴムで消せません" in panel.ink_box.findChild(type(panel.ink_label)).text()
+    panel.run_btn.click()
+    assert wait_until(lambda: "保存しました" in panel.status_label.text())
+    assert "焼き込みました" in panel.status_label.text()
+    boxes = [w for w in QApplication.topLevelWidgets() if isinstance(w, QMessageBox) and w.isVisible()]
+    assert boxes and "書き込みを保存しました" in boxes[0].windowTitle()
+    boxes[0].close()
