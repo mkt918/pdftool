@@ -710,3 +710,14 @@ UI: `ViewerWidget` が書き込みレイヤー（`{PageRef: [Stroke]}`）を持�
 FinishPanel の「書き込みを含める」が `ink_marks()` を読んで保存し、成功したら `mark_ink_saved()`。
 `MainWindow.has_unsaved()`（ページ編集 or 未保存の書き込み）を、文書を開く・更新・終了の確認に使う。
 書き込みは PageRef に紐づくので、回転・トリミングで PageRef が変わると外れる（Undo で戻れば復活）。
+
+### ビューアの拡大・移動（ui/viewer.py）
+
+`_Stage` が左右の `_PageView` を置く台で、全体表示の大きさを `zoom`（1.0〜6.0）倍して `pan` だけずらした位置に子を動かす。
+子の描き方・書き込みの座標（ページに対する割合）は変わらない。ページが台の外へ消えないよう `pan` は範囲内に収め、
+台より小さい向きは動かさない。`ViewerWidget` は `zoom` / `set_zoom()` / `stage.zoom_by()` / `stage.fit()` / `stage.pan_by()`。
+操作: Ctrl+ホイール（カーソル位置を中心に拡大）、＋/－/0 キー、ボタン、ダブルクリック（2.5 倍⇔全体）、ドラッグ・ホイール・
+矢印キーで移動（拡大中の矢印はめくらず移動。PageUp/Down・Space でめくる）、中ボタンドラッグ（ペン選択中でも移動）。
+拡大していないときの通常ホイールはページめくり。めくると拡大したまま左上から見る。
+`zoom >= HI_ZOOM(2.0)` で見ているページだけ `HI_DPI(300)` で取り寄せ直す（`_hires`、最大 `HI_LIMIT` 枚）。
+そのため `RequestFn` は `(ref, on_ready)` と `(ref, on_ready, dpi)` の両方で呼ばれる。

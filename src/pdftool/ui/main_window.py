@@ -541,9 +541,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # ビューアモード / チェックモード
     # ------------------------------------------------------------------
-    def _request_viewer_image(self, ref, on_ready) -> None:
+    def _request_viewer_image(self, ref, on_ready, dpi: int = 150) -> None:
         # 先読みの描画は「実行中の処理」に数えない（閉じるときに確認ダイアログを出さないため）
-        w = self.run_worker(_render_ref_image, ref, self.passwords_dict().get(ref.source_path), 150,
+        w = self.run_worker(_render_ref_image, ref, self.passwords_dict().get(ref.source_path), dpi,
                             on_finished=on_ready, on_error=lambda *_: None)
         if w in self._workers:
             self._workers.remove(w)

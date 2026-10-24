@@ -2,7 +2,10 @@
 
 - 「見開き」: 本のように 2 ページを並べる（「1ページずらす」で組み合わせを変えられる。オンだと 1 ページ目だけ右側に出る）
 - 「1ページ」: 1 ページずつ表示
-- ←/→、PageUp/PageDown、Home/End、＜ ＞ ボタンでめくる
+- ←/→、PageUp/PageDown、Home/End、＜ ＞ ボタンでめくる（拡大していないときはホイールでもめくれる）
+- 拡大・移動: Ctrl+ホイール／＋－キー／ボタン／ダブルクリックで拡大（カーソル位置が動かない）、ドラッグ・ホイール・
+  矢印キーで移動、0 キーか「全体」で全体表示に戻る。中ボタンのドラッグはペン選択中でも移動できる。
+  大きく拡大すると、見ているページだけ高解像度で描き直す
 - 書き込み: ペン・蛍光ペン・消しゴム（ui/ink_tools.py）。書き込みはページの上の別レイヤーで、
   「書き込み: 表示中／非表示」（L）で一瞬で切り替えられる。線は PageRef ごとに持ち（回転・トリミングで
   ページの見た目が変わると別ページ扱い＝その書き込みは出ない）、保存は「仕上げ」タブが担当する。
@@ -17,8 +20,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Callable, Sequence
 
-from PySide6.QtCore import QPointF, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPen
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -33,8 +36,12 @@ from pdftool.core.ink import Stroke, distance_to_stroke
 from pdftool.core.pageops import PageRef
 from pdftool.ui.ink_tools import ERASER, HOLD_MS, NONE, InkState, InkToolBar, paint_stroke
 
-RequestFn = Callable[[PageRef, Callable[[QImage], None]], None]
+RequestFn = Callable[..., None]      # (ref, on_ready) か (ref, on_ready, dpi)
 CACHE_LIMIT = 16
+HI_DPI = 300           # 拡大して見るときに描き直す解像度
+HI_ZOOM = 2.0          # この倍率以上で高解像度を使う
+HI_LIMIT = 4
+ZOOM_STEP = 1.25
 
 
 class _PageView(QWidget):
@@ -74,11 +81,18 @@ class _PageView(QWidget):
         self.strokes = strokes
         self.update()
 
+    def has_page(self) -> bool:
+        return not self._empty
+
     def image_rect(self) -> QRect | None:
         """ページ画像を表示している範囲。画像が無ければ None。"""
+        return self.fit_in(self.rect())
+
+    def fit_in(self, box: QRect) -> QRect | None:
+        """box（このビューの大きさだったら）の中でページ画像が占める範囲。"""
         if self._empty or self._image is None or self._image.isNull():
             return None
-        area = self.rect().adjusted(6, 6, -6, -6)
+        area = box.adjusted(6, 6, -6, -6)
         size = self._image.size().scaled(area.size(), Qt.AspectRatioMode.KeepAspectRatio)
         if self._align & Qt.AlignmentFlag.AlignRight:
             x = area.right() - size.width() + 1
@@ -116,11 +130,10 @@ class _PageView(QWidget):
     # -- 書き込み ---------------------------------------------------------------
     def update_cursor(self) -> None:
         tool = self._ink.tool
-        self.setCursor(
-            Qt.CursorShape.ArrowCursor if tool == NONE
-            else Qt.CursorShape.PointingHandCursor if tool == ERASER
-            else Qt.CursorShape.CrossCursor
-        )
+        if tool == NONE:
+            self.unsetCursor()                     # 親（ステージ）の手のひら／矢印を使う
+        else:
+            self.setCursor(Qt.CursorShape.PointingHandCursor if tool == ERASER else Qt.CursorShape.CrossCursor)
 
     def _frac(self, pos: QPointF, clamp: bool = True) -> tuple[float, float] | None:
         rect = self.image_rect()
@@ -203,6 +216,197 @@ class _PageView(QWidget):
         self.update()
 
 
+class _Stage(QWidget):
+    """ページ（左右）を置く台。全体表示の位置を基準に、倍率 zoom と移動量 pan で子の _PageView を動かす。
+
+    子は「全体表示のときの大きさ」を zoom 倍した大きさになるだけで、ページの描き方・書き込みの座標は変わらない。
+    台の端からはみ出した部分は台が切る。
+    """
+
+    zoom_changed = Signal(float)
+    page_wheel = Signal(int)          # 拡大していないときのホイール: -1 前へ, +1 次へ
+    ZOOM_MIN = 1.0
+    ZOOM_MAX = 6.0
+    MARGIN = 8
+
+    def __init__(self, left: _PageView, right: _PageView, ink: InkState, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("stage")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet("#stage { background: #e5e7eb; }")
+        self.left, self.right = left, right
+        for v in (left, right):
+            v.setParent(self)
+        self._ink = ink
+        self._zoom = 1.0
+        self._pan = QPointF(0.0, 0.0)
+        self._drag: QPointF | None = None
+        self._wheel_acc = 0
+        self.refresh_cursor()
+
+    @property
+    def zoom(self) -> float:
+        return self._zoom
+
+    # -- 配置 -----------------------------------------------------------------
+    def _area(self) -> QRect:
+        m = self.MARGIN
+        return self.rect().adjusted(m, m, -m, -m)
+
+    def _base_rects(self) -> tuple[QRect | None, QRect]:
+        a = self._area()
+        if self.left.isHidden():
+            return None, a
+        half = a.width() // 2
+        return (QRect(a.x(), a.y(), half, a.height()),
+                QRect(a.x() + half, a.y(), a.width() - half, a.height()))
+
+    def _content_box(self) -> QRectF:
+        """全体表示のとき、ページ画像が占める範囲（台の座標）。"""
+        lrect, rrect = self._base_rects()
+        boxes = []
+        for v, g in ((self.left, lrect), (self.right, rrect)):
+            if g is None or not v.has_page():
+                continue
+            local = QRect(0, 0, g.width(), g.height())
+            boxes.append((v.fit_in(local) or local).translated(g.topLeft()))
+        if not boxes:
+            return QRectF(self._area())
+        box = boxes[0]
+        for b in boxes[1:]:
+            box = box.united(b)
+        return QRectF(box)
+
+    def _center(self) -> QPointF:
+        a = self._area()
+        return QPointF(a.x() + a.width() / 2.0, a.y() + a.height() / 2.0)
+
+    def _clamped(self, pan: QPointF, zoom: float) -> QPointF:
+        """ページが台の外へ消えない範囲に収める。台より小さい向きは動かさない。"""
+        if zoom <= 1.0 + 1e-9:
+            return QPointF(0.0, 0.0)
+        a, c, box = self._area(), self._center(), self._content_box()
+
+        def axis(v: float, lo_edge: float, hi_edge: float, size: float) -> float:
+            if (hi_edge - lo_edge) * zoom <= size:
+                return 0.0
+            return min(max(v, size / 2 - hi_edge * zoom), -size / 2 - lo_edge * zoom)
+
+        return QPointF(
+            axis(pan.x(), box.left() - c.x(), box.right() + 1 - c.x(), a.width()),
+            axis(pan.y(), box.top() - c.y(), box.bottom() + 1 - c.y(), a.height()),
+        )
+
+    def relayout(self) -> None:
+        self._pan = self._clamped(self._pan, self._zoom)
+        c, z = self._center(), self._zoom
+        lrect, rrect = self._base_rects()
+        for v, g in ((self.left, lrect), (self.right, rrect)):
+            if g is None:
+                continue
+            x0 = c.x() + (g.x() - c.x()) * z + self._pan.x()
+            y0 = c.y() + (g.y() - c.y()) * z + self._pan.y()
+            x1, y1 = x0 + g.width() * z, y0 + g.height() * z
+            v.setGeometry(round(x0), round(y0), max(1, round(x1) - round(x0)), max(1, round(y1) - round(y0)))
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        self.relayout()
+
+    # -- 拡大・移動 -----------------------------------------------------------------
+    def set_zoom(self, zoom: float, anchor: QPointF | None = None) -> None:
+        """anchor（台の座標。省略は中央）の下にあるページ上の点を動かさずに倍率を変える。"""
+        z0 = self._zoom
+        z = min(self.ZOOM_MAX, max(self.ZOOM_MIN, zoom))
+        if abs(z - z0) < 1e-9:
+            return
+        c = self._center()
+        anchor = anchor if anchor is not None else c
+        ux, uy = (anchor.x() - c.x() - self._pan.x()) / z0, (anchor.y() - c.y() - self._pan.y()) / z0
+        self._zoom = z
+        self._pan = QPointF(anchor.x() - c.x() - ux * z, anchor.y() - c.y() - uy * z)
+        self.relayout()
+        self.refresh_cursor()
+        self.zoom_changed.emit(z)
+
+    def zoom_by(self, factor: float, anchor: QPointF | None = None) -> None:
+        self.set_zoom(self._zoom * factor, anchor)
+
+    def fit(self) -> None:
+        self.set_zoom(1.0)
+
+    def pan_by(self, dx: float, dy: float) -> None:
+        if self._zoom > 1.0:
+            self._pan = QPointF(self._pan.x() + dx, self._pan.y() + dy)
+            self.relayout()
+
+    def snap_topleft(self) -> None:
+        """ページをめくったとき: 拡大したまま、新しいページの左上から見る。"""
+        if self._zoom > 1.0:
+            self._pan = QPointF(1e9, 1e9)
+            self.relayout()
+
+    def refresh_cursor(self) -> None:
+        if self._drag is not None:
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif self._zoom > 1.0 and self._ink.tool == NONE:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    # -- マウス ---------------------------------------------------------------------
+    def wheelEvent(self, e: QWheelEvent) -> None:
+        d = e.angleDelta()
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if d.y():
+                self.zoom_by(1.15 ** (d.y() / 120.0), e.position())
+        elif self._zoom > 1.0:
+            dx, dy = d.x() / 120.0 * 60, d.y() / 120.0 * 60
+            if e.modifiers() & Qt.KeyboardModifier.ShiftModifier and not dx:
+                dx, dy = dy, 0.0
+            self.pan_by(dx, dy)
+        else:
+            self._wheel_acc += d.y()
+            steps = int(self._wheel_acc / 120)
+            if steps:
+                self._wheel_acc -= steps * 120
+                self.page_wheel.emit(-1 if steps > 0 else 1)
+        e.accept()
+
+    def mousePressEvent(self, e: QMouseEvent) -> None:
+        b = e.button()
+        if b == Qt.MouseButton.MiddleButton or (b == Qt.MouseButton.LeftButton and self._zoom > 1.0):
+            self._drag = e.globalPosition()
+            self.refresh_cursor()
+            e.accept()
+        else:
+            e.ignore()
+
+    def mouseMoveEvent(self, e: QMouseEvent) -> None:
+        if self._drag is None:
+            e.ignore()
+            return
+        now = e.globalPosition()
+        self.pan_by(now.x() - self._drag.x(), now.y() - self._drag.y())
+        self._drag = now
+
+    def mouseReleaseEvent(self, e: QMouseEvent) -> None:
+        if self._drag is None:
+            e.ignore()
+            return
+        self._drag = None
+        self.refresh_cursor()
+
+    def mouseDoubleClickEvent(self, e: QMouseEvent) -> None:
+        if e.button() != Qt.MouseButton.LeftButton:
+            e.ignore()
+            return
+        if self._zoom > 1.05:
+            self.fit()
+        else:
+            self.set_zoom(2.5, e.position())
+
+
 class ViewerWidget(QWidget):
     row_changed = Signal(list)     # 表示中のページ（0 始まり）。サムネイル側の選択と同期するため
     exit_requested = Signal()
@@ -216,6 +420,8 @@ class ViewerWidget(QWidget):
         self._row = 0
         self._cache: OrderedDict[PageRef, QImage] = OrderedDict()
         self._pending: set[PageRef] = set()
+        self._hires: OrderedDict[PageRef, QImage] = OrderedDict()     # 拡大して見るときの高解像度版
+        self._pending_hi: set[PageRef] = set()
         self._ink = InkState()
         self._strokes: dict[PageRef, list[Stroke]] = {}    # 書き込みレイヤー（ページごとの線。消しても履歴で戻せる）
         self._history: list[tuple] = []                    # ("add"|"erase"|"clear", ref, ...) 1 つ戻す用
@@ -250,6 +456,19 @@ class ViewerWidget(QWidget):
         bl.addSpacing(12)
         bl.addWidget(self.mode_combo)
         bl.addWidget(self.cover_check)
+        bl.addSpacing(12)
+        self.zoom_out_btn = QPushButton("－")
+        self.zoom_in_btn = QPushButton("＋")
+        self.zoom_btn = QPushButton("全体")
+        self.zoom_out_btn.setToolTip("縮小（－）。Ctrl+ホイールでも変えられます")
+        self.zoom_in_btn.setToolTip("拡大（＋）。Ctrl+ホイール、ダブルクリックでも拡大できます")
+        self.zoom_btn.setToolTip("全体表示に戻す（0）。拡大中はドラッグ・ホイール・矢印キーで動かせます")
+        for b in (self.zoom_out_btn, self.zoom_in_btn):
+            b.setMinimumWidth(36)
+        self.zoom_btn.setMinimumWidth(64)
+        bl.addWidget(self.zoom_out_btn)
+        bl.addWidget(self.zoom_btn)
+        bl.addWidget(self.zoom_in_btn)
         bl.addStretch(1)
         bl.addWidget(self.prev_btn)
         bl.addWidget(self.page_label)
@@ -269,21 +488,36 @@ class ViewerWidget(QWidget):
         for v in (self.left, self.right):
             v.stroke_done.connect(self._on_stroke_done)
             v.erased.connect(self._on_erased)
-        stage = QWidget()
-        stage.setStyleSheet("background: #e5e7eb;")
-        sl = QHBoxLayout(stage)
-        sl.setContentsMargins(8, 8, 8, 8)
-        sl.setSpacing(0)                  # 綴じ目で 2 ページが接する
-        sl.addWidget(self.left, 1)
-        sl.addWidget(self.right, 1)
-        lay.addWidget(stage, 1)
+        self.stage = _Stage(self.left, self.right, self._ink)        # 綴じ目で 2 ページが接する
+        self.stage.zoom_changed.connect(self._on_zoom_changed)
+        self.stage.page_wheel.connect(self.step)
+        lay.addWidget(self.stage, 1)
 
         self.mode_combo.currentIndexChanged.connect(lambda _: self._on_mode_changed())
         self.cover_check.toggled.connect(lambda _: self._render())
         self.prev_btn.clicked.connect(lambda: self.step(-1))
         self.next_btn.clicked.connect(lambda: self.step(1))
-        for w in (self.mode_combo, self.cover_check, self.prev_btn, self.next_btn, self.exit_btn):
+        self.zoom_in_btn.clicked.connect(lambda: self.stage.zoom_by(ZOOM_STEP))
+        self.zoom_out_btn.clicked.connect(lambda: self.stage.zoom_by(1 / ZOOM_STEP))
+        self.zoom_btn.clicked.connect(self.stage.fit)
+        self._on_zoom_changed(1.0)
+        for w in (self.mode_combo, self.cover_check, self.prev_btn, self.next_btn, self.exit_btn,
+                  self.zoom_in_btn, self.zoom_out_btn, self.zoom_btn):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)    # 矢印キーを常にビューアで受ける
+
+    # -- 拡大・移動 -------------------------------------------------------------
+    @property
+    def zoom(self) -> float:
+        return self.stage.zoom
+
+    def set_zoom(self, zoom: float) -> None:
+        self.stage.set_zoom(zoom)
+
+    def _on_zoom_changed(self, z: float) -> None:
+        self.zoom_btn.setText("全体" if z <= 1.0 + 1e-9 else f"{round(z * 100)}%")
+        self.zoom_out_btn.setEnabled(z > _Stage.ZOOM_MIN + 1e-9)
+        self.zoom_in_btn.setEnabled(z < _Stage.ZOOM_MAX - 1e-9)
+        self._paint_pages()                    # 倍率しだいで高解像度版に切り替える
 
     def _on_mode_changed(self) -> None:
         self.cover_check.setEnabled(self.spread)      # 1 ページ表示では意味がないので無効化
@@ -328,6 +562,7 @@ class ViewerWidget(QWidget):
     def _on_tool_changed(self, _tool: str) -> None:
         for v in (self.left, self.right):
             v.update_cursor()
+        self.stage.refresh_cursor()
         self._refresh_ink_views()
 
     def _refresh_ink_views(self) -> None:
@@ -407,6 +642,8 @@ class ViewerWidget(QWidget):
         keep = set(self._refs)
         for k in [k for k in self._cache if k not in keep]:
             del self._cache[k]
+        for k in [k for k in self._hires if k not in keep]:
+            del self._hires[k]
         self._row = max(0, min(len(self._refs) - 1, self._row if row is None else row))
         self._render()
 
@@ -445,16 +682,28 @@ class ViewerWidget(QWidget):
         if rows:
             self._row = min(rows)
         self._render()
+        self.stage.snap_topleft()
 
     def go(self, row: int) -> None:
         if not self._refs:
             return
         self._row = max(0, min(len(self._refs) - 1, row))
         self._render()
+        self.stage.snap_topleft()
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
         k = e.key()
-        if k in (Qt.Key.Key_Left, Qt.Key.Key_PageUp):
+        zoomed = self.stage.zoom > 1.0
+        if k in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self.stage.zoom_by(ZOOM_STEP)
+        elif k in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
+            self.stage.zoom_by(1 / ZOOM_STEP)
+        elif k == Qt.Key.Key_0:
+            self.stage.fit()
+        elif zoomed and k in _PAN_KEYS:                # 拡大中は矢印キーで動かす（めくるのは PageUp/Down・Space）
+            dx, dy = _PAN_KEYS[k]
+            self.stage.pan_by(dx, dy)
+        elif k in (Qt.Key.Key_Left, Qt.Key.Key_PageUp):
             self.step(-1)
         elif k in (Qt.Key.Key_Right, Qt.Key.Key_PageDown, Qt.Key.Key_Space):
             self.step(1)
@@ -495,6 +744,30 @@ class ViewerWidget(QWidget):
             self._cache.popitem(last=False)
         self._paint_pages()
 
+    def _image_for(self, row: int | None) -> QImage | None:
+        """表示に使う画像。拡大中は高解像度版（無ければ取り寄せ、届くまでは通常版）。"""
+        base = self._ensure(row)
+        if base is None or row is None or self.stage.zoom < HI_ZOOM:
+            return base
+        ref = self._refs[row]
+        hi = self._hires.get(ref)
+        if hi is not None:
+            self._hires.move_to_end(ref)
+            return hi
+        if ref not in self._pending_hi:
+            self._pending_hi.add(ref)
+            self._request(ref, lambda im, r=ref: self._on_ready_hi(r, im), HI_DPI)
+        return base
+
+    def _on_ready_hi(self, ref: PageRef, image: QImage) -> None:
+        self._pending_hi.discard(ref)
+        if ref not in self._refs:
+            return
+        self._hires[ref] = image
+        while len(self._hires) > HI_LIMIT:
+            self._hires.popitem(last=False)
+        self._paint_pages()
+
     def _render(self) -> None:
         n = len(self._refs)
         s = self._spread_index(self._row)
@@ -517,17 +790,25 @@ class ViewerWidget(QWidget):
         if self.spread:
             self.right._align = Qt.AlignmentFlag.AlignLeft
             self.left.setVisible(True)
-            self.left.show_image(self._ensure(left), empty=left is None)
+            self.left.show_image(self._image_for(left), empty=left is None)
         else:
             self.right._align = Qt.AlignmentFlag.AlignHCenter
             self.left.setVisible(False)
-        self.right.show_image(self._ensure(right), empty=right is None)
+        self.right.show_image(self._image_for(right), empty=right is None)
         for view, row in ((self.left, left), (self.right, right)):
             ref = self._refs[row] if row is not None else None
             view.set_page(ref, self._strokes.setdefault(ref, []) if ref is not None else [])
+        self.stage.relayout()                  # 左側の出し入れ・画像の大きさで、移動できる範囲が変わる
         here = sum(len(v.strokes) for v in (self.left, self.right) if v.isVisible())
         self.ink_bar.set_counts(here, self.ink_count())
 
+
+_PAN_KEYS = {
+    Qt.Key.Key_Left: (80, 0),
+    Qt.Key.Key_Right: (-80, 0),
+    Qt.Key.Key_Up: (0, 80),
+    Qt.Key.Key_Down: (0, -80),
+}
 
 _INK_KEYS = {
     Qt.Key.Key_P: lambda w: w.set_tool("pen"),
