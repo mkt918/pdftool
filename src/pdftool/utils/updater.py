@@ -26,6 +26,7 @@ REPO = "mkt918/pdftool"
 ASSET_NAME = "PDFUtility.zip"
 STAGING_DIR = "_update"        # アプリのフォルダ内に新しい版を展開する場所
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+RELEASES_URL = f"https://github.com/{REPO}/releases/latest"
 TIMEOUT = 10
 
 
@@ -55,6 +56,11 @@ def is_newer(latest: str, current: str = __version__) -> bool:
 
 def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
+
+
+def is_onefile() -> bool:
+    """1 ファイル版の exe（pdftool_onefile.spec）なら True。隣に _internal/ が無いので差し替えられない。"""
+    return is_frozen() and not (Path(sys.executable).parent / "_internal").is_dir()
 
 
 def check_latest(current: str = __version__, *, opener: Callable | None = None) -> UpdateInfo | None:

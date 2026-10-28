@@ -93,6 +93,11 @@ v0.4.0 からフォルダ形式にしました（起動は数秒→約2秒）。
 起動時に最新版を確認して、ステータスバーの「新しい版に更新」ボタンからフォルダごと差し替えられます。
 **v0.3.3 以前（1ファイルの exe）からは自動更新されません**。最初の1回だけ、Releases から `PDFUtility.zip` を
 ダウンロード・展開して、古い `.exe` の代わりに使ってください。
+Releases の **Assets** にある `PDFUtility.zip`（約97MB）を選んでください。その下の「Source code (zip)」はソースだけ（約100KB）で、アプリは入っていません。
+
+**1ファイル版**: `PDFUtility-onefile.exe` も Releases に置いています（v0.4.1〜）。展開せずにそのまま起動できますが、
+起動のたびに中身を展開するので遅く（数秒）、自動更新もできません（「更新」ボタンを押すとリリースページを開きます）。
+ふだん使いはフォルダ版を勧めます。作り直すときは `.venv\Scripts\pyinstaller --noconfirm pdftool_onefile.spec`。
 同梱の Ghostscript (AGPL) のソースは <https://ghostscript.com/releases/> にあり、このリポジトリのソースと合わせて入手できます。
 新しい版を出すときは `release.bat 0.2.0 "更新内容"` を実行します（テスト・ビルド・タグ付け・Release 公開まで自動）。
 

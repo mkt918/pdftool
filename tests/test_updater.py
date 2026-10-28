@@ -104,3 +104,14 @@ def test_apply_batch_really_swaps_folder(tmp_path: Path, monkeypatch):
     assert not (app / "_internal" / "old_only.txt").exists()
     assert not (app / "_internal_old").exists() and not (app / updater.STAGING_DIR).exists()
     assert exe.exists() and not (app / "_pdftool_update.bat").exists()
+
+
+def test_is_onefile_only_when_frozen_without_internal(tmp_path: Path, monkeypatch):
+    exe = tmp_path / "PDFUtility-onefile.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setattr(updater.sys, "executable", str(exe))
+    assert not updater.is_onefile()                 # 開発実行
+    monkeypatch.setattr(updater.sys, "frozen", True, raising=False)
+    assert updater.is_onefile()                     # 隣に _internal が無い
+    (tmp_path / "_internal").mkdir()
+    assert not updater.is_onefile()                 # フォルダ形式

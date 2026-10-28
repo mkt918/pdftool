@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QCoreApplication, QSettings, QSize, Qt, QThreadPool
-from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QImage, QKeySequence
+from PySide6.QtCore import QCoreApplication, QSettings, QSize, Qt, QThreadPool, QUrl
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QDragEnterEvent, QDropEvent, QImage, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -229,6 +229,13 @@ class MainWindow(QMainWindow):
             return
         if not updater.is_frozen():
             QMessageBox.information(self, "更新", "開発実行中は自動更新できません（exe 版で使えます）。")
+            return
+        if updater.is_onefile():
+            QMessageBox.information(
+                self, "更新",
+                f"1 ファイル版は自動更新できません。\n次のページから v{info.version} の exe をダウンロードして入れ替えてください。\n\n"
+                f"{updater.RELEASES_URL}")
+            QDesktopServices.openUrl(QUrl(updater.RELEASES_URL))
             return
         if self.has_unsaved() and not self._confirm_discard():
             return
