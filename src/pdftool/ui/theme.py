@@ -55,6 +55,10 @@ QToolButton:hover {{ background: #eef2ff; }}
 QToolButton:pressed {{ background: {ACCENT_SOFT}; }}
 QToolButton:disabled {{ color: #b6bcc6; }}
 
+#viewerBar QPushButton, #overflowPopup QPushButton {{ padding: 4px 8px; }}
+#overflowPopup {{ background: #ffffff; border: 1px solid #d1d5db; border-radius: 8px; }}
+#inkTools QPushButton:checked {{ background: {ACCENT_SOFT}; color: {ACCENT}; border-color: #93c5fd; font-weight: bold; }}
+
 QListView {{
     background: #ffffff; border: none; outline: none; padding: 8px;
 }}

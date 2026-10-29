@@ -207,7 +207,7 @@ def test_save_with_ink_via_finish_panel(win, tmp_path: Path, monkeypatch):
 def test_unsaved_ink_asks_before_closing_document(win, tmp_path: Path, monkeypatch):
     vw = _open_viewer(win, tmp_path)
     asked = []
-    monkeypatch.setattr(win, "_confirm_discard", lambda: asked.append(1) or False)
+    monkeypatch.setattr(win, "_confirm_discard", lambda *_: asked.append(1) or False)
     assert not win.has_unsaved()
     vw.set_tool("pen")
     _drag(vw.right, [(0.2, 0.2), (0.6, 0.4)])

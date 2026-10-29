@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
 from pdftool.core.ink import Stroke, distance_to_stroke
 from pdftool.core.pageops import PageRef
 from pdftool.ui.ink_tools import ERASER, HOLD_MS, NONE, InkState, InkToolBar, paint_stroke
+from pdftool.ui.widgets import OverflowBar
 
 RequestFn = Callable[..., None]      # (ref, on_ready) か (ref, on_ready, dpi)
 CACHE_LIMIT = 16
@@ -436,9 +438,8 @@ class ViewerWidget(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        bar = QWidget()
-        bl = QHBoxLayout(bar)
-        bl.setContentsMargins(10, 6, 10, 6)
+        # 操作はすべて 1 行に収める。左は OverflowBar（幅が足りないぶんは右端の「≫」のポップアップへ）、
+        # ページ送りだけは常に見えるよう、その外の右端に置く。
         self.exit_btn = QPushButton("一覧に戻る")
         self.exit_btn.clicked.connect(self.exit_requested)
         self.mode_combo = QComboBox()
@@ -451,16 +452,11 @@ class ViewerWidget(QWidget):
         self.prev_btn = QPushButton("＜")
         self.next_btn = QPushButton("＞")
         for b, tip in ((self.prev_btn, "前へ（←）"), (self.next_btn, "次へ（→）")):
-            b.setMinimumWidth(56)
+            b.setMinimumWidth(34)
             b.setToolTip(tip)
         self.page_label = QLabel()
-        self.page_label.setMinimumWidth(110)
+        self.page_label.setMinimumWidth(90)
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        bl.addWidget(self.exit_btn)
-        bl.addSpacing(12)
-        bl.addWidget(self.mode_combo)
-        bl.addWidget(self.cover_check)
-        bl.addSpacing(12)
         self.zoom_out_btn = QPushButton("－")
         self.zoom_in_btn = QPushButton("＋")
         self.zoom_btn = QPushButton("全体")
@@ -468,24 +464,33 @@ class ViewerWidget(QWidget):
         self.zoom_in_btn.setToolTip("拡大（＋）。Ctrl+ホイール、ダブルクリックでも拡大できます")
         self.zoom_btn.setToolTip("全体表示に戻す（0）。拡大中はドラッグ・ホイール・矢印キーで動かせます")
         for b in (self.zoom_out_btn, self.zoom_in_btn):
-            b.setMinimumWidth(36)
-        self.zoom_btn.setMinimumWidth(64)
-        bl.addWidget(self.zoom_out_btn)
-        bl.addWidget(self.zoom_btn)
-        bl.addWidget(self.zoom_in_btn)
-        bl.addStretch(1)
-        bl.addWidget(self.prev_btn)
-        bl.addWidget(self.page_label)
-        bl.addWidget(self.next_btn)
-        lay.addWidget(bar)
+            b.setMinimumWidth(34)
+        self.zoom_btn.setMinimumWidth(56)
 
-        self.ink_bar = InkToolBar(self._ink)
+        self.ink_bar = InkToolBar(self._ink, self)
         self.ink_bar.tool_changed.connect(self._on_tool_changed)
         self.ink_bar.visible_toggled.connect(lambda _on: self._refresh_ink_views())
         self.ink_bar.undo_clicked.connect(self.undo_ink)
         self.ink_bar.clear_page_clicked.connect(self.clear_page_ink)
         self.ink_bar.save_clicked.connect(self.save_ink_requested)
-        lay.addWidget(self.ink_bar)
+
+        self.bar = OverflowBar()
+        self.bar.setObjectName("viewerBar")
+        self.bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        for w in (self.exit_btn, self.mode_combo, self.cover_check, self.zoom_out_btn, self.zoom_btn,
+                  self.zoom_in_btn):
+            self.bar.add(w)
+        self.ink_bar.populate(self.bar)
+
+        row = QWidget()
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(10, 4, 10, 4)
+        rl.setSpacing(8)
+        rl.addWidget(self.bar, 1)
+        rl.addWidget(self.prev_btn)
+        rl.addWidget(self.page_label)
+        rl.addWidget(self.next_btn)
+        lay.addWidget(row)
 
         self.left = _PageView(Qt.AlignmentFlag.AlignRight, self._ink)
         self.right = _PageView(Qt.AlignmentFlag.AlignLeft, self._ink)

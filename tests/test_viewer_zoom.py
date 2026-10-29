@@ -151,3 +151,83 @@ def test_middle_button_pans_even_with_a_pen(win, tmp_path: Path):
     QTest.mouseMove(vw.right, QPoint(100, 60))
     QTest.mouseRelease(vw.right, Qt.MouseButton.MiddleButton, Qt.KeyboardModifier.NoModifier, QPoint(100, 60))
     assert vw.right.y() < y0 and vw.ink_count() == 0
+
+
+def test_viewer_controls_stay_on_one_row_at_any_width(win, tmp_path: Path):
+    """操作列は何ピクセルでも 1 行。入りきらないぶんは「≫」にたたまれる（2〜3 行に折り返さない）。"""
+    vw = _open_viewer(win, tmp_path, spread=False)
+    win.act_side.setChecked(False)
+    row_h = None
+    for w in (1400, 900, 700, 520):
+        win.resize(w, 700)
+        QApplication.processEvents()
+        assert vw.bar.height() < 60                                   # 1 行の高さのまま
+        row_h = row_h or vw.bar.height()
+        assert vw.bar.height() == row_h
+        assert vw.stage.y() < 90                                      # ページ表示は上のほうから始まる
+        assert vw.prev_btn.isVisible() and vw.next_btn.isVisible() and vw.page_label.isVisible()
+        assert vw.prev_btn.mapTo(vw, QPoint(0, 0)).y() < 60
+
+
+def test_ink_controls_fit_in_the_single_row_when_wide(win, tmp_path: Path):
+    vw = _open_viewer(win, tmp_path, spread=False)
+    win.act_side.setChecked(False)
+    assert not vw.ink_bar.color_box.isVisible()                        # 閲覧中は色・太さを出さない
+    vw.set_tool("pen")
+    win.resize(2000, 700)
+    QApplication.processEvents()
+    for b in (*vw.ink_bar.tool_buttons.values(), vw.ink_bar.layer_btn, vw.ink_bar.undo_btn,
+              vw.ink_bar.clear_btn, vw.ink_bar.save_btn, vw.ink_bar.slider, vw.exit_btn, vw.zoom_btn):
+        assert b.isVisible()
+        assert b.mapTo(vw, QPoint(0, 0)).y() < 60                      # すべて同じ 1 行にある
+
+
+def test_overflowed_controls_are_reachable_from_the_more_button(win, tmp_path: Path):
+    """幅が足りないぶんは「≫」に入り、その中から押せる（隠れて使えなくならない）。"""
+    vw = _open_viewer(win, tmp_path, spread=False)
+    vw.set_tool("pen")
+    win.resize(1500, 700)                                                    # 右パネルを開いたままだと、後ろの操作が入りきらない
+    QApplication.processEvents()
+    bar = vw.bar
+    assert bar.more_btn.isVisible()
+    hidden = bar.hidden_widgets()
+    assert vw.ink_bar.undo_btn in hidden and vw.ink_bar.save_btn in hidden
+    assert vw.zoom_btn not in hidden and vw.exit_btn not in hidden           # 左の基本操作は残る
+    asked = []
+    vw.ink_bar.save_clicked.connect(lambda: asked.append(1))
+    bar.more_btn.click()
+    assert bar._popup.isVisible() and vw.ink_bar.save_btn.isVisible()
+    vw.ink_bar.save_btn.setEnabled(True)
+    vw.ink_bar.save_btn.click()
+    assert asked == [1]
+    bar._popup.hide()
+    win.act_side.setChecked(False)
+    win.resize(2200, 700)                                                    # 広げると全部がバーに戻る
+    QApplication.processEvents()
+    assert not bar.more_btn.isVisible() and bar.hidden_widgets() == []
+    assert vw.ink_bar.undo_btn.isVisible() and vw.ink_bar.undo_btn.parent() is bar
+
+
+def test_overflow_bar_hides_unwanted_items_and_trailing_separator():
+    from PySide6.QtWidgets import QLabel
+
+    from pdftool.ui.widgets import OverflowBar
+
+    bar = OverflowBar()
+    labels = [QLabel("x" * 20) for _ in range(6)]
+    bar.add(labels[0])
+    bar.add_separator()
+    for lb in labels[1:]:
+        bar.add(lb)
+    bar.resize(5000, 30)
+    bar.show()
+    QApplication.processEvents()
+    assert all(lb.isVisible() for lb in labels) and not bar.more_btn.isVisible()
+    bar.set_wanted(labels[2], False)
+    assert not labels[2].isVisible()
+    bar.resize(labels[0].sizeHint().width() + 60, 30)                        # 1 つと区切りしか入らない幅
+    QApplication.processEvents()
+    assert bar.more_btn.isVisible() and labels[0].isVisible()
+    assert labels[5] in bar.hidden_widgets() and labels[2] not in bar.hidden_widgets()
+    seps = [w for w in bar._items if w.property("separator")]
+    assert not any(s.isVisible() for s in seps)                              # 区切り線で終わらない

@@ -531,12 +531,12 @@ def test_qt_native_drag_is_disabled_so_no_forbidden_cursor(win: MainWindow):
 
 
 # ---------------------------------------------------------------------------
-# プレビュー（ダブルクリック）の ＜ ＞ ページ移動
+# プレビュー（右クリックの「プレビュー」）の ＜ ＞ ページ移動
 # ---------------------------------------------------------------------------
 def _open_preview(win: MainWindow, row: int):
     from pdftool.ui.preview_dialog import PagePreviewDialog
 
-    win.view.page_activated.emit(row)
+    win._preview_page(row)
     assert wait_until(lambda: win.findChildren(PagePreviewDialog))
     return win.findChildren(PagePreviewDialog)[-1]
 
@@ -741,3 +741,55 @@ def test_viewer_shift_one_page_changes_spread_pairing(win: MainWindow, tmp_path:
     assert vw.visible_rows() == [2, 3]
     vw.set_spread(False)
     assert not vw.cover_check.isEnabled()
+
+
+# ---------------------------------------------------------------------------
+# サムネイルのダブルクリックでビューア / 右パネルの表示切替 / 破棄の確認
+# ---------------------------------------------------------------------------
+def test_double_click_on_thumbnail_opens_the_viewer_at_that_page(win: MainWindow, tmp_path: Path):
+    win.open_pdf(make_image_pdf(tmp_path / "dc.pdf", pages=5))
+    win.view.page_activated.emit(3)
+    assert win.act_viewer.isChecked() and win.left_stack.currentWidget() is win.viewer
+    assert 3 in win.viewer.visible_rows()
+    assert win.view.selected_rows() and 3 in win.view.selected_rows()
+    win.act_viewer.setChecked(False)
+    assert win.left_stack.currentWidget() is win.view
+
+
+def test_double_click_without_a_document_does_nothing(win: MainWindow):
+    win.view.page_activated.emit(0)
+    assert not win.act_viewer.isChecked()
+
+
+def test_side_panel_toggle_says_what_it_will_do(win: MainWindow):
+    assert "隠す" in win.act_side.text() and "▶" in win.act_side.text()
+    win.act_side.setChecked(False)
+    assert not win.tabs.isVisible() or win.tabs.isHidden()
+    assert "表示" in win.act_side.text() and "◀" in win.act_side.text()
+    win.act_side.trigger()
+    assert win.act_side.isChecked() and "隠す" in win.act_side.text()
+
+
+def test_discard_dialog_uses_clear_button_names(win: MainWindow, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from pdftool.ui import main_window as mw
+
+    seen: dict = {}
+    press = {"text": "破棄して開く"}
+
+    def fake_exec(self):
+        seen["buttons"] = sorted(b.text() for b in self.buttons())
+        seen["default"] = self.defaultButton().text()
+        seen["text"] = self.text()
+        self._clicked = next(b for b in self.buttons() if b.text() == press["text"])
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: self._clicked)
+    del win._confirm_discard                                  # conftest が潰した本物を使う
+    assert mw.MainWindow._confirm_discard(win, "開く") is True
+    assert seen["buttons"] == sorted(["破棄して開く", "戻る"]) and seen["default"] == "戻る"
+    assert "開くと" in seen["text"]
+    press["text"] = "戻る"
+    assert mw.MainWindow._confirm_discard(win, "閉じる") is False
+    assert "破棄して閉じる" in seen["buttons"]

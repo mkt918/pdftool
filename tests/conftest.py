@@ -112,7 +112,7 @@ def win(app, tmp_path: Path):
     QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
 
     w = MainWindow()
-    w._confirm_discard = lambda: True  # モーダルは offscreen で固まるので潰す
+    w._confirm_discard = lambda *_: True  # モーダルは offscreen で固まるので潰す
     w.resize(1000, 700)
     w.show()
     yield w

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QTabWidget,
@@ -88,7 +89,7 @@ class MainWindow(QMainWindow):
         self.thumb_worker.start()
         self.model = ThumbnailModel(self.thumb_worker, self)
         self.view = ThumbnailView(self.model)
-        self.view.page_activated.connect(self._preview_page)
+        self.view.page_activated.connect(self._open_viewer_at)
         self.view.selection_changed.connect(self._on_selection_changed)
         self.view.files_dropped.connect(self._on_files_dropped)
         self.view.context_requested.connect(self._show_context_menu)
@@ -182,12 +183,24 @@ class MainWindow(QMainWindow):
         self.size_combo.currentTextChanged.connect(self._on_thumb_size_changed)
         tb.addWidget(self.size_combo)
         tb.addSeparator()
-        self.act_side = QAction("右パネル", self)
+        # 右端に置き、いま押すと何が起きるかを文字と矢印で示す（隠すとき「パネルを隠す ▶」、隠れているとき「◀ パネルを表示」）
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(spacer)
+        self.act_side = QAction(self)
         self.act_side.setCheckable(True)
         self.act_side.setChecked(True)
-        self.act_side.setStatusTip("右側の機能パネルを表示／非表示")
-        self.act_side.toggled.connect(self.tabs.setVisible)
+        self.act_side.setShortcut(QKeySequence("Ctrl+B"))
+        self.act_side.toggled.connect(self._on_side_toggled)
         tb.addAction(self.act_side)
+        self._on_side_toggled(True)
+
+    def _on_side_toggled(self, shown: bool) -> None:
+        self.tabs.setVisible(shown)
+        self.act_side.setText("パネルを隠す ▶" if shown else "◀ パネルを表示")
+        self.act_side.setStatusTip("右側の機能パネルを隠して、ページを広く表示します（Ctrl+B）" if shown
+                                   else "右側の機能パネルを表示します（Ctrl+B）")
+        self.act_side.setToolTip(self.act_side.statusTip())
 
     def _build_statusbar(self) -> None:
         sb = self.statusBar()
@@ -237,7 +250,7 @@ class MainWindow(QMainWindow):
                 f"{updater.RELEASES_URL}")
             QDesktopServices.openUrl(QUrl(updater.RELEASES_URL))
             return
-        if self.has_unsaved() and not self._confirm_discard():
+        if self.has_unsaved() and not self._confirm_discard("更新する"):
             return
         if QMessageBox.question(
             self, "更新", f"v{info.version} をダウンロードして再起動します。よろしいですか？",
@@ -382,7 +395,7 @@ class MainWindow(QMainWindow):
     def open_pdf(self, path: Path | str) -> bool:
         path = Path(path)
         if self.has_unsaved():
-            if not self._confirm_discard():
+            if not self._confirm_discard("開く"):
                 return False
         pl, password = self._load_with_password(lambda pw: PageList.from_pdf(path, pw), path)
         if pl is None:
@@ -497,12 +510,20 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(panel)
         panel.ink_box.setChecked(True)
 
-    def _confirm_discard(self) -> bool:
-        r = QMessageBox.question(
-            self, "確認", "保存していない変更（ページの編集・書き込み）があります。破棄しますか？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        return r == QMessageBox.StandardButton.Yes
+    def _confirm_discard(self, action: str = "閉じる") -> bool:
+        """保存していない変更を捨てて action（閉じる／開く／更新する）してよいか尋ねる。捨てるなら True。
+
+        ボタンは「破棄して○○」と「戻る」。Yes/No だとどちらが何をするか分かりにくいため。
+        """
+        box = QMessageBox(QMessageBox.Icon.Warning, "保存していない変更があります",
+                          "保存していない変更（ページの編集・書き込み）があります。\n"
+                          f"このまま{action}と、それらは失われます。", parent=self)
+        discard = box.addButton(f"破棄して{action}", QMessageBox.ButtonRole.DestructiveRole)
+        back = box.addButton("戻る", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(back)
+        box.setEscapeButton(back)
+        box.exec()
+        return box.clickedButton() is discard
 
     # ------------------------------------------------------------------
     # ページ操作（ツールバー）
@@ -590,6 +611,14 @@ class MainWindow(QMainWindow):
             if rows:
                 self.view.scrollTo(self.model.index(rows[0]))
             self.view.setFocus()
+
+    def _open_viewer_at(self, row: int) -> None:
+        """サムネイルのダブルクリック: そのページからビューアで開く（Esc か「一覧に戻る」で戻る）。"""
+        pl = self.page_list
+        if not pl or not 0 <= row < len(pl):
+            return
+        self.view.select_rows([row])
+        self.act_viewer.setChecked(True)
 
     def _on_viewer_rows(self, rows: list) -> None:
         """ビューアで見ているページを一覧側の選択にも反映する（回転・削除などがそのページに効く）。"""

@@ -360,7 +360,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
     # 既定の背景ハイライトだけだとサムネイル画像に隠れて選択が分かりにくかったため
 
 class ThumbnailView(QListView):
-    page_activated: Signal(int)          # ダブルクリック
+    page_activated: Signal(int)          # ダブルクリック（MainWindow._open_viewer_at が受け、そのページからビューアで開く）
     selection_changed: Signal(list)      # 選択行（昇順）
     def selected_rows(self) -> list[int]
     def select_rows(self, rows)
@@ -515,7 +515,8 @@ offscreen では QDrag が即キャンセルされ再現できなかった）。
 - 検証用ハーネスは使い捨て（scratchpad）。実マウスを動かすので、実行前に「クリック位置の下が自プロセスのウィンドウか」を
   `WindowFromPoint` で確認してから押す作りにしてあった
 
-### プレビュー（ダブルクリック）の ＜ ＞ 移動
+### プレビュー（右クリックの「プレビュー」）の ＜ ＞ 移動
+（v0.4.2 から、ダブルクリックはビューアを開く。プレビューは右クリックメニューから `MainWindow._preview_page(row)`）
 `ui/preview_dialog.PagePreviewDialog(image, title, parent, *, count, row, request, title_fn)`。
 `count > 1` かつ `request(row, on_ready)` があると下に「＜ 3 / 12 ＞」バーが出る（←/→・PageUp/PageDown・Home/End も可）。
 `MainWindow._preview_page` は開いた時点の `pl.pages` のスナップショットを使い、`_render_ref_image`
@@ -736,3 +737,19 @@ FinishPanel の「書き込みを含める」が `ink_marks()` を読んで保�
 - ビューアの描画待ち行列（`ViewerWidget._want / _pump / _on_loaded`）: 要求は 1 件ずつ出し、めくるたびに待ち行列を
   作り直す（今のページ → 高解像度版 → 先読み: 次の見開き 2 つと前の見開き）。すばやく 10 回めくった後の待ち 1.0 秒 → 0.1 秒。
   描画に失敗したら `on_ready(None)` が呼ばれ、そのページは「このページは表示できません」と出して再試行しない
+
+## 操作列の 1 行化・パネル切替・破棄の確認（v0.4.2）
+
+- `ui/widgets.OverflowBar`: 部品を横 1 行に並べ、入りきらない**後ろの部品**を右端の「≫」（`more_btn`）のポップアップへ移す。
+  `add(w)` / `add_separator()` / `set_wanted(w, on)`（出さない間は幅を取らない）/ `hidden_widgets()`。
+  QToolBar の「≫」は QMainWindow の外では隠れた部品を出せないため自前。ポップアップは縦並び。区切り線で終わらせない。
+  レイアウトの SizeConstraint は SetNoConstraint（幅の下限は `minimumSizeHint`）。
+- `ViewerWidget.bar`（OverflowBar）に 一覧に戻る・見開き・ずらす・ズーム → 区切り → ツール → 色と太さ → 区切り → 書き込みの操作 の順に並ぶ。
+  ページ送り（`prev_btn` / `page_label` / `next_btn`）はバーの外の右端で常に見える。
+- `InkToolBar` は QWidget をやめて **QObject**。部品（`tools_box` / `color_box` / `layer_btn` / `undo_btn` / `clear_btn` / `save_btn` …）を持ち、
+  `populate(bar)` でバーに並べる。`tool_buttons` は QPushButton。色と太さ（`color_box`）はペン・蛍光ペンのときだけバーに出す。
+  `clear_btn` の文言は「ページ消去」。
+- `MainWindow.act_side`（右パネルの表示切替）: 出ているとき「パネルを隠す ▶」、隠れているとき「◀ パネルを表示」。Ctrl+B。`_on_side_toggled(shown)`。
+- `MainWindow._open_viewer_at(row)`: サムネイルのダブルクリック（`page_activated`）でそのページからビューアを開く。
+- `MainWindow._confirm_discard(action="閉じる")`: ボタンは「破棄して○○」「戻る」（既定は戻る）。action は 閉じる／開く／更新する。
+

@@ -2,14 +2,14 @@
 
 - InkState: 今のツールと、ペン／蛍光ペンごとの色・太さ、書き込みレイヤーの表示/非表示
 - paint_stroke: 線を QPainter で描く（ビューアの表示と、太さのプレビューで共通）
-- InkToolBar: ツール選択・色・太さ・レイヤー表示切替などの操作列
+- InkToolBar: ツール選択・色・太さ・レイヤー表示切替などの部品（ビューアの 1 行のバーに並べる）
 
 線の座標と太さは、ページに対する割合（core/ink.py）。画面の大きさが変わっても同じ見た目になる。
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -18,13 +18,12 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
-    QToolButton,
-    QVBoxLayout,
     QWidget,
 )
 
 from pdftool.core.ink import MARKER, PEN, Stroke
 from pdftool.ui.theme import ACCENT
+from pdftool.ui.widgets import OverflowBar
 
 NONE = "none"          # 閲覧のみ（書き込まない）
 ERASER = "eraser"
@@ -87,13 +86,13 @@ class _Swatch(QPushButton):
     def __init__(self, color: str, parent: QWidget | None = None):
         super().__init__(parent)
         self.color = QColor(color)
-        self.setFixedSize(26, 26)
+        self.setFixedSize(18, 18)
         self.setCheckable(True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(color)
         self.setStyleSheet(
-            f"QPushButton {{ background: {color}; border: 2px solid #d1d5db; border-radius: 13px; padding: 0; }}"
+            f"QPushButton {{ background: {color}; border: 2px solid #d1d5db; border-radius: 9px; padding: 0; }}"
             f"QPushButton:hover {{ border-color: #9ca3af; }}"
             f"QPushButton:checked {{ border: 3px solid {ACCENT}; }}"
         )
@@ -105,7 +104,7 @@ class _WidthPreview(QWidget):
     def __init__(self, state: InkState, parent: QWidget | None = None):
         super().__init__(parent)
         self._state = state
-        self.setFixedSize(110, 40)
+        self.setFixedSize(48, 26)
 
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
@@ -117,7 +116,7 @@ class _WidthPreview(QWidget):
         # 蛍光ペンは下に文字風の線を引いて、乗算の見え方も見せる
         if kind == MARKER:
             p.setPen(QPen(QColor("#374151"), 2))
-            p.drawLine(14, 20, 106, 20)
+            p.drawLine(int(self.width() * 0.12), self.height() // 2, int(self.width() * 0.88), self.height() // 2)
         px = min(self.height() - 6.0, self._state.width[kind] * 900.0 / WIDTH_SCALE)     # 画面でページ幅 900px のときの太さ
         st = Stroke(kind, (c.red(), c.green(), c.blue()), px / self.width(), ((0.12, 0.5), (0.5, 0.38), (0.88, 0.5)))
         p.setClipRect(self.rect().adjusted(1, 1, -1, -1))
@@ -125,8 +124,12 @@ class _WidthPreview(QWidget):
         p.end()
 
 
-class InkToolBar(QWidget):
-    """ツール・色・太さ・書き込みレイヤーの表示切替・取り消しなどの操作列。"""
+class InkToolBar(QObject):
+    """ツール・色・太さ・書き込みレイヤーの表示切替・取り消しなどの部品。
+
+    部品は populate() でビューアの 1 行のバー（OverflowBar）に並べる。幅が足りないぶんは、
+    右端の「≫」のポップアップにたたむ（2 行・3 行に折り返さない）。
+    """
 
     tool_changed = Signal(str)
     visible_toggled = Signal(bool)
@@ -134,60 +137,59 @@ class InkToolBar(QWidget):
     clear_page_clicked = Signal()
     save_clicked = Signal()
 
-    def __init__(self, state: InkState, parent: QWidget | None = None):
+    def __init__(self, state: InkState, parent: QObject | None = None):
         super().__init__(parent)
         self.state = state
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 4, 10, 6)
-        outer.setSpacing(4)
-        lay = QHBoxLayout()                    # 1 段目: ツール・色・太さ
-        outer.addLayout(lay)
-        lay2 = QHBoxLayout()                   # 2 段目: 書き込みレイヤーの表示切替・取り消しなど
-        outer.addLayout(lay2)
 
-        self.tool_buttons: dict[str, QToolButton] = {}
+        # ツール（閲覧・ペン・蛍光ペン・消しゴム）
+        self.tools_box = QWidget()
+        self.tools_box.setObjectName("inkTools")           # 選んでいるツールを青く示す（theme.py）
+        lay = QHBoxLayout(self.tools_box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        self.tool_buttons: dict[str, QPushButton] = {}
         group = QButtonGroup(self)
         group.setExclusive(True)
         for tool in TOOLS:
-            b = QToolButton()
+            b = QPushButton()
             b.setText(TOOL_LABELS[tool])
             b.setCheckable(True)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             b.setToolTip(TOOL_LABELS[tool] + (f"（{TOOL_KEYS[tool]}）" if TOOL_KEYS[tool] else "（Esc）"))
-            b.setMinimumWidth(56)
             group.addButton(b)
             b.clicked.connect(lambda _=False, t=tool: self.set_tool(t))
             lay.addWidget(b)
             self.tool_buttons[tool] = b
         self.tool_buttons[NONE].setChecked(True)
-        lay.addSpacing(10)
 
+        # 色と太さ（ペン・蛍光ペンのときだけ使える）
+        self.color_box = QWidget()
+        cl = QHBoxLayout(self.color_box)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(4)
         self.swatch_box = QWidget()
         self._swatch_lay = QHBoxLayout(self.swatch_box)
         self._swatch_lay.setContentsMargins(0, 0, 0, 0)
-        self._swatch_lay.setSpacing(4)
-        lay.addWidget(self.swatch_box)
-        self.custom_btn = QToolButton()
-        self.custom_btn.setText("＋")
+        self._swatch_lay.setSpacing(3)
+        cl.addWidget(self.swatch_box)
+        self.custom_btn = QPushButton("＋")
+        self.custom_btn.setFixedWidth(30)
         self.custom_btn.setToolTip("好きな色を選ぶ")
         self.custom_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.custom_btn.clicked.connect(self._pick_custom)
-        lay.addWidget(self.custom_btn)
-        lay.addSpacing(10)
-
+        cl.addWidget(self.custom_btn)
         self.width_label = QLabel("太さ")
-        lay.addWidget(self.width_label)
+        cl.addWidget(self.width_label)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(*WIDTH_RANGE)
-        self.slider.setFixedWidth(110)
+        self.slider.setFixedWidth(64)
         self.slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.slider.valueChanged.connect(self._on_width)
-        lay.addWidget(self.slider)
+        cl.addWidget(self.slider)
         self.preview = _WidthPreview(state)
-        lay.addWidget(self.preview)
-        lay.addStretch(1)
-        lay2.addStretch(1)
+        cl.addWidget(self.preview)
 
+        # 書き込みレイヤーの操作
         self.layer_btn = QPushButton()
         self.layer_btn.setCheckable(True)
         self.layer_btn.setChecked(True)
@@ -196,16 +198,28 @@ class InkToolBar(QWidget):
         self.undo_btn = QPushButton("1つ戻す")
         self.undo_btn.setToolTip("直前の書き込みを取り消します（U）")
         self.undo_btn.clicked.connect(self.undo_clicked)
-        self.clear_btn = QPushButton("このページを消去")
+        self.clear_btn = QPushButton("ページ消去")
+        self.clear_btn.setToolTip("いま見ているページの書き込みをすべて消します（「1つ戻す」で戻せます）")
         self.clear_btn.clicked.connect(self.clear_page_clicked)
         self.save_btn = QPushButton("書き込みを保存…")
         self.save_btn.setToolTip("「仕上げ」タブで、書き込みを含めた新しいPDFとして保存します")
         self.save_btn.clicked.connect(self.save_clicked)
-        for b in (self.layer_btn, self.undo_btn, self.clear_btn, self.save_btn):
+        self.action_buttons = (self.layer_btn, self.undo_btn, self.clear_btn, self.save_btn)
+        for b in self.action_buttons:
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            lay2.addWidget(b)
         self._refresh_layer_text()
         self.refresh()
+
+    def populate(self, bar: OverflowBar) -> None:
+        """バーの右側に、ツール → 色と太さ → 書き込みの操作 の順に並べる（足りない幅は後ろから「≫」へ）。"""
+        self._bar = bar
+        bar.add_separator()
+        bar.add(self.tools_box)
+        bar.add(self.color_box)
+        bar.set_wanted(self.color_box, self.state.drawing)       # 色と太さは、ペン・蛍光ペンのときだけ出す（1 行に収めるため）
+        bar.add_separator()
+        for b in self.action_buttons:
+            bar.add(b)
 
     # -- 状態の反映 -----------------------------------------------------------
     def set_tool(self, tool: str) -> None:
@@ -253,6 +267,9 @@ class InkToolBar(QWidget):
             self.slider.blockSignals(False)
         for w in (self.swatch_box, self.custom_btn, self.slider, self.width_label):
             w.setEnabled(kind is not None)
+        bar = getattr(self, "_bar", None)
+        if bar is not None:
+            bar.set_wanted(self.color_box, kind is not None)
         self.preview.update()
 
     def _set_color(self, color: QColor) -> None:
