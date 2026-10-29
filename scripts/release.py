@@ -23,7 +23,7 @@ APP_DIR = ROOT / "dist" / "PDFユーティリティ"     # pdftool.spec の COLL
 
 
 def run(*cmd: str) -> None:
-    print(">", " ".join(cmd))
+    print(">", " ".join(cmd).encode("cp932", "replace").decode("cp932"))      # メモに cp932 で出せない文字があっても落とさない
     subprocess.run(cmd, cwd=ROOT, check=True)
 
 
