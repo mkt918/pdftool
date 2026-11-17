@@ -6,6 +6,7 @@ import os
 import time
 from pathlib import Path
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
@@ -751,7 +752,6 @@ def test_double_click_on_thumbnail_opens_the_viewer_at_that_page(win: MainWindow
     win.view.page_activated.emit(3)
     assert win.act_viewer.isChecked() and win.left_stack.currentWidget() is win.viewer
     assert 3 in win.viewer.visible_rows()
-    assert win.view.selected_rows() and 3 in win.view.selected_rows()
     win.act_viewer.setChecked(False)
     assert win.left_stack.currentWidget() is win.view
 
@@ -793,3 +793,95 @@ def test_discard_dialog_uses_clear_button_names(win: MainWindow, monkeypatch):
     press["text"] = "戻る"
     assert mw.MainWindow._confirm_discard(win, "閉じる") is False
     assert "破棄して閉じる" in seen["buttons"]
+
+
+# ---------------------------------------------------------------------------
+# サムネイルの実マウス操作: ダブルクリック→ビューア、Shift+クリックの範囲選択
+# ---------------------------------------------------------------------------
+def _grid_win(win: MainWindow, tmp_path: Path, pages: int = 16):
+    from PySide6.QtWidgets import QApplication
+
+    win.open_pdf(make_image_pdf(tmp_path / "grid.pdf", pages=pages))
+    win.resize(1900, 800)
+    win.show()
+    QApplication.processEvents()
+    v = win.view
+    assert len({v.visualRect(win.model.index(r)).top() for r in range(pages)}) < pages // 3     # 1 行に 3 枚以上並ぶ
+    return v
+
+
+def _click(v, row: int, mods=None, double: bool = False):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    mods = mods or Qt.KeyboardModifier.NoModifier
+    fn = QTest.mouseDClick if double else QTest.mouseClick
+    fn(v.viewport(), Qt.MouseButton.LeftButton, mods, v.visualRect(v.model().index(row)).center())
+
+
+@pytest.mark.parametrize("tab", [0, 2], ids=["export(check mode)", "pageops"])
+def test_real_double_click_opens_viewer_in_both_tab_modes(win: MainWindow, tmp_path: Path, tab: int):
+    v = _grid_win(win, tmp_path)
+    win.tabs.setCurrentIndex(tab)
+    assert v.check_mode == (tab == 0)
+    _click(v, 6, double=True)
+    assert win.act_viewer.isChecked() and win.left_stack.currentWidget() is win.viewer
+    assert 6 in win.viewer.visible_rows()
+
+
+def test_double_click_keeps_the_export_checks(win: MainWindow, tmp_path: Path):
+    v = _grid_win(win, tmp_path)
+    win.tabs.setCurrentIndex(0)
+    for r in (1, 3, 11):
+        _click(v, r)
+    assert v.selected_rows() == [1, 3, 11]
+    _click(v, 6, double=True)                                  # 画像書き出しで選んだページを、開くだけでは壊さない
+    assert win.act_viewer.isChecked() and 6 in win.viewer.visible_rows()
+    assert v.selected_rows() == [1, 3, 11]
+    win.act_viewer.setChecked(False)
+    assert v.selected_rows() == [1, 3, 11]
+
+
+@pytest.mark.parametrize("tab", [0, 2], ids=["export(check mode)", "pageops"])
+def test_shift_click_selects_in_page_order_from_the_last_clicked_page(win: MainWindow, tmp_path: Path, tab: int):
+    from PySide6.QtCore import Qt
+
+    S = Qt.KeyboardModifier.ShiftModifier
+    v = _grid_win(win, tmp_path)
+    win.tabs.setCurrentIndex(tab)
+    _click(v, 2)
+    _click(v, 11, S)
+    assert v.selected_rows() == list(range(2, 12))             # 格子の四角形ではなく、並び順で 2〜11
+    _click(v, 5, S)                                            # 起点は 2 のまま。範囲が作り直される（添えるのは画像書き出しタブだけ）
+    expect = list(range(2, 12)) if tab == 0 else list(range(2, 6))
+    assert v.selected_rows() == expect
+    _click(v, 13)
+    _click(v, 8, S)                                            # 後ろから前へも
+    assert {8, 9, 10, 11, 12, 13} <= set(v.selected_rows())
+    assert 0 not in v.selected_rows()
+
+
+def test_shift_click_after_ctrl_click_uses_that_page_and_ctrl_shift_adds(win: MainWindow, tmp_path: Path):
+    from PySide6.QtCore import Qt
+
+    S, C = Qt.KeyboardModifier.ShiftModifier, Qt.KeyboardModifier.ControlModifier
+    v = _grid_win(win, tmp_path)
+    win.tabs.setCurrentIndex(2)
+    _click(v, 1)
+    _click(v, 3, C)                                            # 最後に選んだのは 3
+    _click(v, 6, S)
+    assert v.selected_rows() == [3, 4, 5, 6]                   # 3 から（1 は外れる）
+    _click(v, 12, C)
+    _click(v, 14, C | S)                                       # Ctrl+Shift: いまの選択に足す
+    assert v.selected_rows() == [3, 4, 5, 6, 12, 13, 14]
+
+
+def test_quick_shift_clicks_do_not_open_the_viewer(win: MainWindow, tmp_path: Path):
+    from PySide6.QtCore import Qt
+
+    v = _grid_win(win, tmp_path)
+    win.tabs.setCurrentIndex(2)
+    _click(v, 1)
+    _click(v, 5, Qt.KeyboardModifier.ShiftModifier, double=True)       # 素早い Shift+クリックは「ダブルクリック」ではない
+    assert not win.act_viewer.isChecked()
+    assert v.selected_rows() == [1, 2, 3, 4, 5]

@@ -8,6 +8,7 @@
                      ThumbnailWorker に描画を依頼する（＝表示範囲だけ遅延描画）。
   ThumbnailView   … QListView。複数選択、D&D 並べ替え（dropEvent で PageList.move を呼ぶ）、
                      ダブルクリックで page_activated(row) を emit。
+                     Shift+クリックは、最後に選んだページからクリック先まで並び順で範囲選択（格子の四角形にはしない）。
 
 変更操作（remove/rotate/move/undo/redo）はモデル経由で行うこと。
 モデルが PageList を触ったあと、必要な範囲で dataChanged / reset を出す。
@@ -408,6 +409,8 @@ class ThumbnailView(QListView):
         self.setItemDelegate(self._delegate)
         self._check_mode = False
         self._toggle_off_on_release = False
+        self._anchor = -1                    # Shift+クリックの起点（最後にクリックして選んだページ）
+        self._swallow_release = False        # 自前で処理した押下の「離す」を Qt に渡さない
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setResizeMode(QListView.ResizeMode.Adjust)
         self.setMovement(QListView.Movement.Static)   # 位置は自前の dropEvent で決める
@@ -428,9 +431,10 @@ class ThumbnailView(QListView):
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setTextElideMode(Qt.TextElideMode.ElideNone)
         self._apply_size()
-        self.doubleClicked.connect(lambda idx: self.page_activated.emit(idx.row()))
         self.selectionModel().selectionChanged.connect(lambda *_: self.selection_changed.emit(self.selected_rows()))
         model.modelReset.connect(lambda: self.selection_changed.emit([]))
+        for sig in (model.modelReset, model.rowsInserted, model.rowsRemoved, model.rowsMoved, model.layoutChanged):
+            sig.connect(lambda *_: setattr(self, "_anchor", -1))      # ページの並びが変わったら起点は無効
 
     # -- ホイールスクロール ------------------------------------------------------
     # IconMode + ScrollPerPixel だと Qt 既定の1ノッチが「サムネイル1行ぶん×3」前後になり、
@@ -466,6 +470,7 @@ class ThumbnailView(QListView):
         return sorted({i.row() for i in self.selectionModel().selectedIndexes()})
 
     def select_rows(self, rows: Iterable[int]) -> None:
+        rows = list(rows)
         sm = self.selectionModel()
         sm.clearSelection()
         sel = QItemSelection()
@@ -473,6 +478,28 @@ class ThumbnailView(QListView):
             idx = self._model.index(r)
             sel.select(idx, idx)
         sm.select(sel, QItemSelectionModel.SelectionFlag.Select)
+        if rows:
+            self._anchor = rows[-1]
+
+    def _range_anchor(self, clicked: int) -> int:
+        """Shift+クリックの起点。最後にクリックして選んだページ。無ければ現在のページ、それも無ければ押したページ。"""
+        if 0 <= self._anchor < self._model.rowCount():
+            return self._anchor
+        cur = self.currentIndex()
+        if cur.isValid():
+            return cur.row()
+        sel = self.selected_rows()
+        return sel[-1] if sel else clicked
+
+    def _select_range_to(self, row: int, add: bool) -> None:
+        """起点から row までを、並び順のとおり（格子の四角形ではなく）まとめて選ぶ。add=False なら他の選択は外す。"""
+        lo, hi = sorted((self._range_anchor(row), row))
+        sm = self.selectionModel()
+        if not add:
+            sm.clearSelection()
+        sel = QItemSelection(self._model.index(lo), self._model.index(hi))
+        sm.select(sel, QItemSelectionModel.SelectionFlag.Select)
+        sm.setCurrentIndex(self._model.index(row), QItemSelectionModel.SelectionFlag.NoUpdate)
 
     # -- PDF・画像ファイルのドロップ（外部ドラッグ。Qt 標準の D&D） -------------------
     # 受け入れ判定は Qt 既定（アイテム上のドロップを拒否する等）に頼らず自前で accept し、
@@ -586,12 +613,22 @@ class ThumbnailView(QListView):
     def mousePressEvent(self, e) -> None:
         self._press_pos = None
         self._toggle_off_on_release = False
+        self._swallow_release = False
         if e.button() == Qt.MouseButton.LeftButton:
             idx = self.indexAt(e.position().toPoint())
             if idx.isValid():
+                mods = e.modifiers()
+                if mods & Qt.KeyboardModifier.ShiftModifier:
+                    # Shift+クリック: 最後に選んだページからクリックしたページまで、並び順で全部選ぶ。
+                    # Ctrl も押していれば、いまの選択に足す（画像書き出しタブでも足す）。
+                    self._select_range_to(idx.row(), add=bool(mods & Qt.KeyboardModifier.ControlModifier) or self._check_mode)
+                    self._swallow_release = True
+                    e.accept()
+                    return
+                self._anchor = idx.row()
                 self._press_pos = e.position().toPoint()
                 self._press_row = idx.row()
-                plain = not (e.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+                plain = not (mods & Qt.KeyboardModifier.ControlModifier)
                 if self._check_mode and plain:
                     if idx.row() in self.selected_rows():
                         self._toggle_off_on_release = True      # 動かさずに離したら外す
@@ -620,7 +657,27 @@ class ThumbnailView(QListView):
                 return
         super().mouseMoveEvent(e)
 
+    def mouseDoubleClickEvent(self, e) -> None:
+        """ページのダブルクリック → page_activated。Qt 標準の doubleClicked に頼らない
+        （画像書き出しタブでは押下を自前で処理していて、Qt が「ダブルクリック」と判定してくれないため）。"""
+        if e.button() == Qt.MouseButton.LeftButton:
+            idx = self.indexAt(e.position().toPoint())
+            if idx.isValid() and not (e.modifiers() & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier)):
+                self._press_pos = None
+                self._toggle_off_on_release = False
+                self._swallow_release = True
+                e.accept()
+                self.page_activated.emit(idx.row())
+                return
+            self.mousePressEvent(e)            # Shift/Ctrl つきの素早い 2 回目や、ページの外は、ふつうの押下として扱う
+            return
+        super().mouseDoubleClickEvent(e)
+
     def mouseReleaseEvent(self, e) -> None:
+        if self._swallow_release and e.button() == Qt.MouseButton.LeftButton:
+            self._swallow_release = False
+            e.accept()
+            return
         if self._reordering and e.button() == Qt.MouseButton.LeftButton:
             self._end_reorder(apply=True)
             e.accept()
@@ -642,6 +699,8 @@ class ThumbnailView(QListView):
             e.accept()
             return
         super().keyPressEvent(e)
+        if not (e.modifiers() & Qt.KeyboardModifier.ShiftModifier) and self.currentIndex().isValid():
+            self._anchor = self.currentIndex().row()        # 矢印キーで動いたら、そこを起点にする
 
     def _begin_reorder(self, pos: QPoint) -> None:
         self._toggle_off_on_release = False

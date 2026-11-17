@@ -753,3 +753,15 @@ FinishPanel の「書き込みを含める」が `ink_marks()` を読んで保�
 - `MainWindow._open_viewer_at(row)`: サムネイルのダブルクリック（`page_activated`）でそのページからビューアを開く。
 - `MainWindow._confirm_discard(action="閉じる")`: ボタンは「破棄して○○」「戻る」（既定は戻る）。action は 閉じる／開く／更新する。
 
+## サムネイルのダブルクリックと Shift 範囲選択（v0.4.3）
+
+- `ThumbnailView.mouseDoubleClickEvent` が `page_activated(row)` を出す（Qt 標準の `doubleClicked` は使わない）。
+  画像書き出しタブ（チェックモード）は押下を自前で処理しており、Qt が「ダブルクリック」と判定しなかったため。
+  Shift/Ctrl つきの素早い 2 回目は、ダブルクリックではなくふつうの押下として扱う。
+- `MainWindow._open_viewer_at(row)` は**選択を変えず**、`_viewer_start` でビューアの開始ページだけ渡す
+  （画像書き出しで選んだページのチェックを壊さない）。
+- Shift+クリック: `ThumbnailView._select_range_to(row, add)` が、起点（`_anchor` = 最後にクリックして選んだページ。
+  無ければ現在のページ）から row までを**並び順**で選ぶ。IconMode の Qt 標準 Shift 選択は格子の四角形になるため自前。
+  起点は Shift+クリックでは動かない。`add` は Ctrl 併用か画像書き出しタブのとき（いまの選択に足す）。
+  ページの並びが変わったら（`modelReset` / 挿入・削除・移動）起点は無効になり、現在のページにフォールバックする。
+

@@ -212,6 +212,7 @@ class MainWindow(QMainWindow):
         self.btn_update.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_update.clicked.connect(self._start_update)
         self._update_info: updater.UpdateInfo | None = None
+        self._viewer_start: int | None = None     # ダブルクリックで開くときのページ（None なら選択の先頭）
         sb.addPermanentWidget(self.btn_update)
         sb.addPermanentWidget(self.lbl_gs)
         self.gs_recheck_btn = QPushButton("再検出")
@@ -602,7 +603,8 @@ class MainWindow(QMainWindow):
         self.size_combo.setEnabled(not on)
         if on:
             rows = self.view.selected_rows()
-            self.viewer.set_refs(list(pl.pages), rows[0] if rows else 0)
+            start = self._viewer_start if self._viewer_start is not None else (rows[0] if rows else 0)
+            self.viewer.set_refs(list(pl.pages), start)
             self.left_stack.setCurrentWidget(self.viewer)
             self.viewer.setFocus()
         else:
@@ -617,8 +619,9 @@ class MainWindow(QMainWindow):
         pl = self.page_list
         if not pl or not 0 <= row < len(pl):
             return
-        self.view.select_rows([row])
+        self._viewer_start = row                 # 選択は変えない（画像書き出しタブのチェックを壊さないため）
         self.act_viewer.setChecked(True)
+        self._viewer_start = None
 
     def _on_viewer_rows(self, rows: list) -> None:
         """ビューアで見ているページを一覧側の選択にも反映する（回転・削除などがそのページに効く）。"""
